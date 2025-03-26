@@ -1,6 +1,5 @@
-
 """
-Economic System Simulation Module hhh
+Economic System Simulation Module 
 
 This module provides classes and functions for simulating an economic system with various agents,
 assets, liabilities, and financial instruments.
@@ -81,6 +80,9 @@ class BalanceSheetEntry:
     settlement_details: SettlementDetails
     name: Optional[str] = None
     issuance_time: str = 't0'
+    book_value: Optional[float] = None
+    expected_cash_flow: Optional[float] = None
+    parent_bond: Optional[str] = None  # Reference to the main bond
 
     def matches(self, other: 'BalanceSheetEntry') -> bool:
         return (
@@ -186,6 +188,8 @@ class AssetLiabilityPair:
         self.asset_holder = asset_holder
         self.liability_holder = liability_holder
         self.asset_name = asset_name
+        self.initial_book_value = amount  # BV₀
+        self.connected_claims = []  # 存储相关的claims
 
         if type == EntryType.NON_FINANCIAL.value:
             if liability_holder is not None:
@@ -231,46 +235,86 @@ class AssetLiabilityPair:
             name=None
         )
 
+        # Create connected claims for coupon and amortizing bonds
+        if self.type in [EntryType.BOND_COUPON.value, EntryType.BOND_AMORTIZING.value]:
+            claims = self.create_bond_claims()
+            self.connected_claims = claims
+            
+            # Add claims to asset holder's assets
+            for claim in claims:
+                self.asset_holder.add_asset(claim)
+                
+                # Create corresponding liability
+                liability = BalanceSheetEntry(
+                    type=claim.type,
+                    is_asset=False,
+                    counterparty=self.asset_holder.name,
+                    amount=claim.amount,
+                    denomination=claim.denomination,
+                    maturity_type=claim.maturity_type,
+                    maturity_date=claim.maturity_date,
+                    settlement_details=claim.settlement_details
+                )
+                self.liability_holder.add_liability(liability)
+
         return asset_entry, liability_entry
 
     def _create_bond_payment_schedule(self) -> List[Tuple[datetime, float, str]]:
-        """Create bond payment schedule based on bond type"""
+        """Create payment schedule for different types of bonds"""
         if not self.bond_type:
             raise ValueError("Bond type must be specified for bonds")
 
         schedule = []
+        t1 = datetime(2050, 1, 1)
+        t2 = datetime(2100, 1, 1)
+        
         if self.type == EntryType.BOND_ZERO_COUPON.value:
-            # Zero-coupon bond: only pay principal at maturity
+            # Zero-coupon bond: only principal payment at maturity
             schedule.append((self.maturity_date, self.amount, "principal"))
 
         elif self.type == EntryType.BOND_COUPON.value:
-            # Coupon bond: pay coupons periodically, principal at maturity
             if not self.coupon_rate:
                 raise ValueError("Coupon rate is required for coupon bonds")
             
-            # Set payment date to t1 or t2
-            payment_date = datetime(2050, 1, 1) if self.time.year < 2050 else datetime(2100, 1, 1)
-            coupon_amount = self.amount * self.coupon_rate
-            schedule.append((payment_date, coupon_amount, 'coupon'))
-            schedule.append((payment_date, self.amount, 'principal'))
+            is_t2_maturity = self.maturity_date == t2
+            
+            if not is_t2_maturity:  # Matures at t1
+                schedule.append((t1, self.amount * self.coupon_rate, 'coupon'))
+                schedule.append((t1, self.amount, 'principal'))
+            else:  # Matures at t2
+                schedule.append((t1, self.amount * self.coupon_rate, 'coupon'))
+                schedule.append((t2, self.amount * self.coupon_rate, 'coupon'))
+                schedule.append((t2, self.amount, 'principal'))
 
         elif self.type == EntryType.BOND_AMORTIZING.value:
-            # Amortizing bond: pay principal and interest periodically
             if not self.coupon_rate:
                 raise ValueError("Interest rate is required for amortizing bonds")
             
-            payment = self._calculate_amortization_payment()
-            remaining_principal = self.amount
+            is_t2_maturity = self.maturity_date == t2
             
-            # Set payment date to t1 or t2
-            payment_date = datetime(2050, 1, 1) if self.time.year < 2050 else datetime(2100, 1, 1)
-            interest = remaining_principal * self.coupon_rate
-            principal = payment - interest
-            remaining_principal -= principal
-            
-            # Add principal and interest payments
-            schedule.append((payment_date, principal, 'principal'))
-            schedule.append((payment_date, interest, 'coupon'))
+            if is_t2_maturity:  # Matures at t2
+                # Split payments between t1 and t2
+                principal_payment_t1 = self.amount / 2
+                interest_payment_t1 = self.amount * self.coupon_rate
+                schedule.append((t1, principal_payment_t1, 'principal'))
+                schedule.append((t1, interest_payment_t1, 'coupon'))
+                
+                principal_payment_t2 = self.amount / 2
+                interest_payment_t2 = (self.amount / 2) * self.coupon_rate
+                schedule.append((t2, principal_payment_t2, 'principal'))
+                schedule.append((t2, interest_payment_t2, 'coupon'))
+            else:  # Matures at t1
+                schedule.append((t1, self.amount, 'principal'))
+                schedule.append((t1, self.amount * self.coupon_rate, 'coupon'))
+
+        # Debug information
+        print(f"\nBond Payment Schedule Details:")
+        print(f"Bond Type: {self.type}")
+        print(f"Maturity Date: {'t2' if self.maturity_date == t2 else 't1'}")
+        print("\nPayment Schedule:")
+        for date, amount, payment_type in sorted(schedule):
+            time_point = 't2' if date == t2 else 't1'
+            print(f"- {time_point}: {amount:.2f} ({payment_type})")
 
         return schedule
 
@@ -303,12 +347,63 @@ class AssetLiabilityPair:
         return asset_entry, liability_entry
 
     def _calculate_amortization_payment(self) -> float:
-        r = self.coupon_rate
-        n = (self.maturity_date - self.time).days // 365
-        pv = self.amount
-        if r == 0:
-            return pv / n
-        return (pv * r * (1 + r)**n) / ((1 + r)**n - 1)
+        """Calculate the payment amount for amortizing bond"""
+        r = self.coupon_rate  # annual interest rate
+        pv = self.amount      # face value
+        
+        # Since our model only has one payment at t1 or t2
+        # We return the sum of principal and interest due
+        total_payment = pv * (1 + r)
+        
+        return total_payment
+
+    def create_bond_claims(self) -> List[BalanceSheetEntry]:
+        """Create connected claims for bonds"""
+        claims = []
+        if self.type in [EntryType.BOND_COUPON.value, EntryType.BOND_AMORTIZING.value]:
+            schedule = self._create_bond_payment_schedule()
+            
+            # Generate a unique identifier for this bond
+            bond_id = f"bond_{self.type}_{id(self)}"  # 使用对象的id作为唯一标识符
+            
+            for date, amount, payment_type in schedule:
+                # Calculate book value and expected cash flow
+                bv = amount  # This should be calculated based on the formula
+                cf = amount / self.initial_book_value  # As portion of BV₀
+                
+                # Create claim with correct maturity date
+                claim = BalanceSheetEntry(
+                    type=EntryType.PAYABLE,
+                    is_asset=True,
+                    counterparty=self.liability_holder.name,
+                    amount=amount,
+                    denomination=self.denomination,
+                    maturity_type=MaturityType.FIXED_DATE,
+                    maturity_date=date,
+                    settlement_details=self.settlement_details,
+                    name=f"{payment_type}_claim_{date.year}",  # 不再依赖bond的name属性
+                    book_value=bv,
+                    expected_cash_flow=cf,
+                    parent_bond=bond_id  # 使用生成的bond_id
+                )
+                claims.append(claim)
+                
+                print(f"Creating claim for {payment_type} payment at {date.year}")
+                
+        return claims
+
+    def transfer_to(self, new_holder: Agent):
+        """Transfer bond and all connected claims to new holder"""
+        # Transfer main bond entry
+        self.asset_holder.remove_asset(self.asset_entry)
+        new_holder.add_asset(self.asset_entry)
+        
+        # Transfer all connected claims
+        for claim in self.connected_claims:
+            self.asset_holder.remove_asset(claim)
+            new_holder.add_asset(claim)
+        
+        self.asset_holder = new_holder
 
 class EconomicSystem:
     """Main class for managing the economic system simulation"""
@@ -319,6 +414,10 @@ class EconomicSystem:
         self.current_time_state = "t0"
         self.simulation_finalized = False
         self.save_state('t0')
+        self.system_dates = {
+            't1': datetime(2050, 1, 1),  # 这个可以在系统初始化时设置
+            't2': datetime(2100, 1, 1)
+        }
 
     def add_agent(self, agent: Agent):
         self.agents[agent.name] = agent
