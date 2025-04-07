@@ -899,8 +899,9 @@ class ExcelExporter:
     def __init__(self, system: EconomicSystem):
         self.system = system
 
-    def create_t_table(self, sheet, row_start: int, col_start: int, agent: Agent, time_point: str):
+    def create_t_table(self, sheet, row_start: int, col_start: int, agent: Agent, time_point: str,Textual_information):
         thick = Side(style='thick', color='000000')
+        Textual_information[agent.name]=[]
             
         # Add time point header
         time_header = sheet.cell(row=row_start, column=1)
@@ -928,7 +929,8 @@ class ExcelExporter:
             cell = sheet.cell(row=row_start + 1, column=col_start + i)
             cell.value = header
             cell.alignment = Alignment(horizontal="center")
-
+            
+        
         # Display balance sheet entries
         current_row = row_start + 2
         if time_point!='t0':
@@ -956,6 +958,7 @@ class ExcelExporter:
                         sheet.cell(row=current_row, column=col_start).value=f" -  {temp_assets_type}: {temp_assets.amount} {temp_assets.denomination} to {temp_assets.counterparty}{maturity_info} [issued at {temp_assets.issuance_time}]"
                         current_row += 1
         for entry in agent.assets:
+            examine=False
             # Skip entries that were issued after the current time point
             time_points = ['t0', 't1', 't2']
             if time_points.index(entry.issuance_time) > time_points.index(time_point):
@@ -978,6 +981,7 @@ class ExcelExporter:
                 entry_type = "receivable"
             elif entry.type == EntryType.DELIVERY_CLAIM:
                 entry_type = f"delivery claim for {entry.name}" if entry.name else "delivery claim"
+                examine=True
             elif entry.type == EntryType.DEFAULT:
                 entry_type = f"default claim ({entry.name})"
             else:
@@ -985,6 +989,12 @@ class ExcelExporter:
             
             if entry.issuance_time == time_point:
                     sheet.cell(row=current_row, column=col_start).value=f" +  {entry_type}: {entry.amount} {entry.denomination} to {entry.counterparty}{maturity_info} [issued at {entry.issuance_time}]"
+                    if time_point=='t0':
+                        sheet.cell(row=current_row, column=col_start).value=f"  {entry_type}: {entry.amount} {entry.denomination} to {entry.counterparty}{maturity_info} [issued at {entry.issuance_time}]"
+                        if entry_type=='non_financial' or examine:
+                            Textual_information[agent.name].append([entry_type, entry.amount, entry.denomination, entry.counterparty, maturity_info, entry.issuance_time,entry.name])
+                        else:
+                            Textual_information[agent.name].append([entry_type, entry.amount, entry.denomination, entry.counterparty, maturity_info, entry.issuance_time])
             else:
                 continue
             current_row += 1
@@ -994,8 +1004,10 @@ class ExcelExporter:
             prev_time='t'+str(int(time_point[1])-1)
             for i, k in self.system.compute_changes(prev_time,time_point).items():
                 if i==agent.name:
+                    Textual_information[i]=[]
                     for temp_liabilities in k['removed_liabilities']:
                         maturity_info = ""
+                        test=False
                         if temp_liabilities.maturity_type == MaturityType.FIXED_DATE:
                             if temp_liabilities.maturity_date.year == 2100:
                                 maturity_info = " (matures at t2)"
@@ -1007,12 +1019,17 @@ class ExcelExporter:
                             temp_liabilities_type = "receivable"
                         elif temp_liabilities.type == EntryType.DELIVERY_CLAIM:
                             temp_liabilities_type = f"delivery claim for {temp_liabilities.name}" if temp_liabilities.name else "delivery claim"
+                            test=True
                         elif temp_liabilities.type == EntryType.DEFAULT:
                             temp_liabilities_type = f"default claim ({temp_liabilities.name})"
                         else:
                             temp_liabilities_type = temp_liabilities.type.value
                         
                         sheet.cell(row=current_row, column=col_start).value=f" -  {temp_liabilities_type}: {temp_liabilities.amount} {temp_liabilities.denomination} to {temp_liabilities.counterparty}{maturity_info} [issued at {temp_liabilities.issuance_time}]"
+                        if test:
+                            Textual_information[i].append([temp_liabilities_type ,temp_liabilities.amount , temp_liabilities.denomination, temp_liabilities.counterparty, maturity_info ,temp_liabilities.issuance_time, temp_liabilities.name])
+                        else:
+                            Textual_information[i].append([temp_liabilities_type ,temp_liabilities.amount , temp_liabilities.denomination, temp_liabilities.counterparty, maturity_info ,temp_liabilities.issuance_time])
                         current_row += 1
         for entry in agent.liabilities:
             # Skip entries that were issued after the current time point
@@ -1041,6 +1058,8 @@ class ExcelExporter:
                 entry_type = entry.type.value
             if entry.issuance_time == time_point:
                 sheet.cell(row=current_row, column=col_start+1).value=f" +  {entry_type}: {entry.amount} {entry.denomination} to {entry.counterparty}{maturity_info} [issued at {entry.issuance_time}]"
+                if time_point=='t0':
+                    sheet.cell(row=current_row, column=col_start+1).value=f"  {entry_type}: {entry.amount} {entry.denomination} to {entry.counterparty}{maturity_info} [issued at {entry.issuance_time}]"
             else:
                 continue
             current_row += 1
@@ -1054,6 +1073,7 @@ class ExcelExporter:
         sheet.cell(row=total_row + 2, column=col_start).value = "Net Worth:"
         sheet.cell(row=total_row + 2, column=col_start + 1).value = agent.get_net_worth()
 
+            
         return total_row + 4
 
     def export_balance_sheets(self, filename: str):
@@ -1090,6 +1110,7 @@ class ExcelExporter:
             # Add time point separator
             sheet.cell(row=current_row, column=1).value = "=" * 50
             current_row += 1
+            Textual_information={}
 
             col_start = 2
             max_row_in_timepoint = current_row
@@ -1097,7 +1118,7 @@ class ExcelExporter:
             for agent in agents:
                 max_row_in_timepoint = max(
                     max_row_in_timepoint,
-                    self.create_t_table(sheet, current_row, col_start, agent, time_point)
+                    self.create_t_table(sheet, current_row, col_start, agent, time_point,Textual_information)
                 )
                 col_start += 4
 
@@ -1110,7 +1131,31 @@ class ExcelExporter:
             sheet.cell(row=system_total_row + 2, column=2).value = sum(agent.get_total_liabilities() for agent in agents)
             sheet.cell(row=system_total_row + 3, column=1).value = "Total Net Worth:"
             sheet.cell(row=system_total_row + 3, column=2).value = sum(agent.get_net_worth() for agent in agents)
-            
+            sheet.cell(row=system_total_row + 1, column=col_start).value=f'{time_point}:'
+            system_total_row+=1
+            if time_point=='t0':
+                for name in Textual_information.keys():
+                    for line in Textual_information[name]:
+                        system_total_row+=1
+                        if line[0]=='non_financial':
+                            sheet.cell(row=system_total_row, column=col_start).value=f'{name} holds {line[1]} {line[2]} of {line[-1]} as non-financial asset'
+                        elif len(line[0])>=8 and line[0][:8]=='delivery' and line[0]!='delivery claim':
+                            sheet.cell(row=system_total_row, column=col_start).value=f'{name} holds a Claim  to receive asset for {line[1]} {line[2]} of {line[-1]} as non-financial asset from {line[3]} at {line[4]} who has issued the promise to deliver liability for {line[1]} {line[2]} of {line[-1]} as non-financial asset.'
+                        else:
+                            sheet.cell(row=system_total_row, column=col_start).value=f'{name} holds {line[0]} asset issued by {line[3]} as its {line[0]} liability that pays {line[1]} {line[2]} at {line[4]}'
+            else:
+                for name in Textual_information.keys():
+                    for line in Textual_information[name]:
+                        system_total_row+=1
+                        if len(line[0])>=8 and line[0][:8]=='delivery' and line[0]!='delivery claim':
+                            sheet.cell(row=system_total_row, column=col_start).value=f'{line[3]} extinguishes the Claim asset to receive {line[1]} {line[2]} of {line[-1]} at {line[4]} issued as a liability by {name}. {name} extinguishes the corresponding liability.'
+                            system_total_row+=1
+                            sheet.cell(row=system_total_row, column=col_start).value=f'{name} transfers the {line[1]} {line[2]} of {line[-1]} to {line[3]}'
+                        else:
+                            sheet.cell(row=system_total_row, column=col_start).value=f'{line[3]} extinguishes the Claim asset to receive {line[1]} {line[2]} at {line[4]} issued as a liability by {name}. {name} extinguishes the corresponding liability.'
+                            system_total_row+=1
+                            sheet.cell(row=system_total_row, column=col_start).value=f'{name} transfers the {line[1]} {line[2]} to {line[3]}'
+                    
             current_row = system_total_row + 5  # Leave space between time points
 
         # Adjust column widths
