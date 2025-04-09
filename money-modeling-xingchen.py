@@ -1,5 +1,5 @@
 """
-Economic System Simulation Module
+Economic System Simulation Module 
 
 This module provides classes and functions for simulating an economic system with various agents,
 assets, liabilities, and financial instruments.
@@ -80,6 +80,9 @@ class BalanceSheetEntry:
     settlement_details: SettlementDetails
     name: Optional[str] = None
     issuance_time: str = 't0'
+    book_value: Optional[float] = None
+    expected_cash_flow: Optional[float] = None
+    parent_bond: Optional[str] = None  # Reference to the main bond
 
     def matches(self, other: 'BalanceSheetEntry') -> bool:
         return (
@@ -164,17 +167,15 @@ class AssetLiabilityPair:
     """Represents a pair of corresponding asset and liability entries"""
     def __init__(self, time: datetime, type: str, amount: float,
                  denomination: str, maturity_type: MaturityType,
-                 maturity_date: Optional[datetime], 
-                 settlement_type: SettlementType,
+                 maturity_date: Optional[datetime], settlement_type: SettlementType,
                  settlement_denomination: str, asset_holder: Agent,
-                 asset_name: Optional[str] = None, = None,
-                 bond_type: Optional[int] = None,,
+                 liability_holder: Optional[Agent] = None,
+                 asset_name: Optional[str] = None,
+                 bond_type: Optional[int] = None,
                  coupon_rate: Optional[float] = None):
-        self.time = timerate: Optional[float] = None,
-        self.type = typey_timepoint: Optional[str] = "t1"):
+        self.time = time
+        self.type = type
         self.amount = amount
-        self.denomination = denomination
-        self.maturity_type = maturity_type
         self.denomination = denomination
         self.maturity_type = maturity_type
         self.maturity_date = maturity_date
@@ -187,7 +188,8 @@ class AssetLiabilityPair:
         self.asset_holder = asset_holder
         self.liability_holder = liability_holder
         self.asset_name = asset_name
-        self.maturity_timepoint = maturity_timepoint  # New attribute for t1/t2
+        self.initial_book_value = amount  # BV₀
+        self.connected_claims = []  # 存储相关的claims
 
         if type == EntryType.NON_FINANCIAL.value:
             if liability_holder is not None:
@@ -233,65 +235,87 @@ class AssetLiabilityPair:
             name=None
         )
 
+        # Create connected claims for coupon and amortizing bonds
+        if self.type in [EntryType.BOND_COUPON.value, EntryType.BOND_AMORTIZING.value]:
+            claims = self.create_bond_claims()
+            self.connected_claims = claims
+            
+            # Add claims to asset holder's assets
+            for claim in claims:
+                self.asset_holder.add_asset(claim)
+                
+                # Create corresponding liability
+                liability = BalanceSheetEntry(
+                    type=claim.type,
+                    is_asset=False,
+                    counterparty=self.asset_holder.name,
+                    amount=claim.amount,
+                    denomination=claim.denomination,
+                    maturity_type=claim.maturity_type,
+                    maturity_date=claim.maturity_date,
+                    settlement_details=claim.settlement_details
+                )
+                self.liability_holder.add_liability(liability)
+
         return asset_entry, liability_entry
 
     def _create_bond_payment_schedule(self) -> List[Tuple[datetime, float, str]]:
-        """Create bond payment schedule based on bond type with debug info for maturity_date"""
-        print(f"[DEBUG] Bond maturity_date is: {self.maturity_date.strftime('%Y-%m-%d')}")
+        """Create payment schedule for different types of bonds"""
         if not self.bond_type:
             raise ValueError("Bond type must be specified for bonds")
-        
+
         schedule = []
-        if self.type == EntryType.BOND_ZERO_COUPON.value:
-            # Zero-coupon bond: only pay principal at maturity
-            schedule.append((self.maturity_date, self.amount, "principal"))
+        t1 = datetime(2050, 1, 1)
+        t2 = datetime(2100, 1, 1)
         
+        if self.type == EntryType.BOND_ZERO_COUPON.value:
+            # Zero-coupon bond: only principal payment at maturity
+            schedule.append((self.maturity_date, self.amount, "principal"))
+
         elif self.type == EntryType.BOND_COUPON.value:
-            # Coupon bond: pay coupons periodically and principal at maturity
             if not self.coupon_rate:
                 raise ValueError("Coupon rate is required for coupon bonds")
-    
-            coupon_amount = self.amount * self.coupon_rate
-            if self.maturity_date.year == 2100:
-                # 当选择 t2 时，假定在 t1（2050）支付一期利息，
-                # 在 t2（2100）支付本金和最后一期利息
-                t1 = datetime(2050, 1, 1)
-                t2 = self.maturity_date
-                schedule.append((t1, coupon_amount, 'coupon'))
-                schedule.append((t2, coupon_amount, 'coupon'))
-                schedule.append((t2, self.amount, 'principal'))
-            else:
-                # 当选择 t1 时，所有支付都在 t1
-                t1 = self.maturity_date
-                schedule.append((t1, coupon_amount, 'coupon'))
+            
+            is_t2_maturity = self.maturity_date == t2
+            
+            if not is_t2_maturity:  # Matures at t1
+                schedule.append((t1, self.amount * self.coupon_rate, 'coupon'))
                 schedule.append((t1, self.amount, 'principal'))
-    
+            else:  # Matures at t2
+                schedule.append((t1, self.amount * self.coupon_rate, 'coupon'))
+                schedule.append((t2, self.amount * self.coupon_rate, 'coupon'))
+                schedule.append((t2, self.amount, 'principal'))
+
         elif self.type == EntryType.BOND_AMORTIZING.value:
-            # Amortizing bond: pay principal and interest in installments
-            if self.coupon_rate is None:
+            if not self.coupon_rate:
                 raise ValueError("Interest rate is required for amortizing bonds")
-    
-            if self.maturity_date.year == 2100:
-                t1 = datetime(2050, 1, 1)
-                t2 = self.maturity_date
-                payment_t1 = self._calculate_amortization_payment()
-                interest_t1 = self.amount * self.coupon_rate
-                principal_t1 = payment_t1 - interest_t1
-                schedule.append((t1, interest_t1, 'coupon'))
-                schedule.append((t1, principal_t1, 'principal'))
-    
-                remaining_principal = self.amount - principal_t1
-                interest_t2 = remaining_principal * self.coupon_rate
-                schedule.append((t2, interest_t2, 'coupon'))
-                schedule.append((t2, remaining_principal, 'principal'))
-            else:
-                t1 = self.maturity_date
-                payment = self._calculate_amortization_payment()
-                interest = self.amount * self.coupon_rate
-                principal = payment - interest
-                schedule.append((t1, interest, 'coupon'))
-                schedule.append((t1, principal, 'principal'))
-    
+            
+            is_t2_maturity = self.maturity_date == t2
+            
+            if is_t2_maturity:  # Matures at t2
+                # Split payments between t1 and t2
+                principal_payment_t1 = self.amount / 2
+                interest_payment_t1 = self.amount * self.coupon_rate
+                schedule.append((t1, principal_payment_t1, 'principal'))
+                schedule.append((t1, interest_payment_t1, 'coupon'))
+                
+                principal_payment_t2 = self.amount / 2
+                interest_payment_t2 = (self.amount / 2) * self.coupon_rate
+                schedule.append((t2, principal_payment_t2, 'principal'))
+                schedule.append((t2, interest_payment_t2, 'coupon'))
+            else:  # Matures at t1
+                schedule.append((t1, self.amount, 'principal'))
+                schedule.append((t1, self.amount * self.coupon_rate, 'coupon'))
+
+        # Debug information
+        print(f"\nBond Payment Schedule Details:")
+        print(f"Bond Type: {self.type}")
+        print(f"Maturity Date: {'t2' if self.maturity_date == t2 else 't1'}")
+        print("\nPayment Schedule:")
+        for date, amount, payment_type in sorted(schedule):
+            time_point = 't2' if date == t2 else 't1'
+            print(f"- {time_point}: {amount:.2f} ({payment_type})")
+
         return schedule
 
     def _create_bond_entries(self, payment_schedule: List[Tuple[datetime, float, str]]) -> Tuple[BalanceSheetEntry, BalanceSheetEntry]:
@@ -323,12 +347,63 @@ class AssetLiabilityPair:
         return asset_entry, liability_entry
 
     def _calculate_amortization_payment(self) -> float:
-        r = self.coupon_rate
-        n = (self.maturity_date - self.time).days // 365
-        pv = self.amount
-        if r == 0:
-            return pv / n
-        return (pv * r * (1 + r)**n) / ((1 + r)**n - 1)
+        """Calculate the payment amount for amortizing bond"""
+        r = self.coupon_rate  # annual interest rate
+        pv = self.amount      # face value
+        
+        # Since our model only has one payment at t1 or t2
+        # We return the sum of principal and interest due
+        total_payment = pv * (1 + r)
+        
+        return total_payment
+
+    def create_bond_claims(self) -> List[BalanceSheetEntry]:
+        """Create connected claims for bonds"""
+        claims = []
+        if self.type in [EntryType.BOND_COUPON.value, EntryType.BOND_AMORTIZING.value]:
+            schedule = self._create_bond_payment_schedule()
+            
+            # Generate a unique identifier for this bond
+            bond_id = f"bond_{self.type}_{id(self)}"  # 使用对象的id作为唯一标识符
+            
+            for date, amount, payment_type in schedule:
+                # Calculate book value and expected cash flow
+                bv = amount  # This should be calculated based on the formula
+                cf = amount / self.initial_book_value  # As portion of BV₀
+                
+                # Create claim with correct maturity date
+                claim = BalanceSheetEntry(
+                    type=EntryType.PAYABLE,
+                    is_asset=True,
+                    counterparty=self.liability_holder.name,
+                    amount=amount,
+                    denomination=self.denomination,
+                    maturity_type=MaturityType.FIXED_DATE,
+                    maturity_date=date,
+                    settlement_details=self.settlement_details,
+                    name=f"{payment_type}_claim_{date.year}",  # 不再依赖bond的name属性
+                    book_value=bv,
+                    expected_cash_flow=cf,
+                    parent_bond=bond_id  # 使用生成的bond_id
+                )
+                claims.append(claim)
+                
+                print(f"Creating claim for {payment_type} payment at {date.year}")
+                
+        return claims
+
+    def transfer_to(self, new_holder: Agent):
+        """Transfer bond and all connected claims to new holder"""
+        # Transfer main bond entry
+        self.asset_holder.remove_asset(self.asset_entry)
+        new_holder.add_asset(self.asset_entry)
+        
+        # Transfer all connected claims
+        for claim in self.connected_claims:
+            self.asset_holder.remove_asset(claim)
+            new_holder.add_asset(claim)
+        
+        self.asset_holder = new_holder
 
 class EconomicSystem:
     """Main class for managing the economic system simulation"""
@@ -339,6 +414,10 @@ class EconomicSystem:
         self.current_time_state = "t0"
         self.simulation_finalized = False
         self.save_state('t0')
+        self.system_dates = {
+            't1': datetime(2050, 1, 1),  # 这个可以在系统初始化时设置
+            't2': datetime(2100, 1, 1)
+        }
 
     def add_agent(self, agent: Agent):
         self.agents[agent.name] = agent
@@ -346,11 +425,35 @@ class EconomicSystem:
             self.save_state('t0')
 
     def create_asset_liability_pair(self, pair: AssetLiabilityPair):
-        self.asset_liability_pairs.append(pair)
+        # Verify that only banks can hold loans (this check is already in create_entries)
         asset_entry, liability_entry = pair.create_entries()
+        self.asset_liability_pairs.append(pair)
         pair.asset_holder.add_asset(asset_entry)
         if liability_entry:
             pair.liability_holder.add_liability(liability_entry)
+
+        # When creating a loan, automatically create corresponding deposit
+        if pair.type == EntryType.LOAN.value:
+            # At this point, we're guaranteed that asset_holder is a bank
+            # because create_entries() would have thrown an error otherwise
+            deposit_pair = AssetLiabilityPair(
+                time=datetime.now(),
+                type=EntryType.DEPOSIT.value,
+                amount=pair.amount,  # Deposit amount equals loan amount
+                denomination=pair.denomination,
+                maturity_type=MaturityType.ON_DEMAND,
+                maturity_date=None,
+                settlement_type=SettlementType.MEANS_OF_PAYMENT,
+                settlement_denomination=pair.denomination,
+                asset_holder=pair.liability_holder,  # Borrower gets deposit asset
+                liability_holder=pair.asset_holder,  # Bank holds deposit liability
+            )
+            
+            deposit_asset, deposit_liability = deposit_pair.create_entries()
+            deposit_pair.asset_holder.add_asset(deposit_asset)
+            deposit_pair.liability_holder.add_liability(deposit_liability)
+            self.asset_liability_pairs.append(deposit_pair)
+
         self.save_state(self.current_time_state)
 
     def save_state(self, time_point: str):
@@ -875,163 +978,160 @@ class EconomicSystem:
                 break
             except ValueError:
                 print("Error: Please enter a valid number")
-                 and timepoint
+                
         denomination = input("Enter denomination (e.g., USD, EUR): ")
 
-        # For bonds, we require fixed maturity dateme point:")
+        # For bonds, we require fixed maturity date
         if entry_type in [EntryType.BOND_ZERO_COUPON, EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
             maturity_type = MaturityType.FIXED_DATE
-            print("\nSelect bond maturity:")2): "))
+            print("\nSelect bond maturity:")
             print("1. t1 (2050)")
-            print("2. t2 (2100)") You may choose to keep maturity_date for compatibility;
-            time_point = int(input("Enter choice (1-2): ")) behind the scenes.
-            maturity_date = datetime(2050, 1, 1) if time_point == 1 else datetime(2100, 1, 1), 1) if maturity_timepoint == "t1" else datetime(2100, 1, 1)
+            print("2. t2 (2100)")
+            time_point = int(input("Enter choice (1-2): "))
+            maturity_date = datetime(2050, 1, 1) if time_point == 1 else datetime(2100, 1, 1)
         else:
-            # Get maturity type and date for non-bond entriesd date for non-bond entries
-            print("\nSelect maturity type:")ity type:")
+            # Get maturity type and date for non-bond entries
+            print("\nSelect maturity type:")
             print("1. On demand")
-            print("2. Fixed date")print("2. Fixed date")
+            print("2. Fixed date")
             print("3. Perpetual")
-            maturity_idx = int(input("Enter choice (1-3): ")) - 13): ")) - 1
+            maturity_idx = int(input("Enter choice (1-3): ")) - 1
             
             if maturity_idx == 0:
                 maturity_type = MaturityType.ON_DEMAND
                 maturity_date = None
             elif maturity_idx == 1:
-                maturity_type = MaturityType.FIXED_DATEityType.FIXED_DATE
+                maturity_type = MaturityType.FIXED_DATE
                 print("\nSelect maturity time point:")
                 print("1. t1 (2050)")
-                print("2. t2 (2100)")rint("2. t2 (2100)")
-                time_point = int(input("Enter choice (1-2): "))1-2): "))
-                maturity_date = datetime(2050, 1, 1) if time_point == 1 else datetime(2100, 1, 1)time(2050, 1, 1) if time_point == 1 else datetime(2100, 1, 1)
-            else:            else:
+                print("2. t2 (2100)")
+                time_point = int(input("Enter choice (1-2): "))
+                maturity_date = datetime(2050, 1, 1) if time_point == 1 else datetime(2100, 1, 1)
+            else:
                 maturity_type = MaturityType.PERPETUAL
                 maturity_date = None
 
-        # For bonds, default to means of payment settlementettlement
-        if entry_type in [EntryType.BOND_ZERO_COUPON, EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:try_type in [EntryType.BOND_ZERO_COUPON, EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
+        # For bonds, default to means of payment settlement
+        if entry_type in [EntryType.BOND_ZERO_COUPON, EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
             settlement_type = SettlementType.MEANS_OF_PAYMENT
-            settlement_denomination = denominationtion
+            settlement_denomination = denomination
         else:
-            # Get settlement type and denomination for non-bond entriesand denomination for non-bond entries
-            print("\nSelect settlement type:"):")
-            print("1. Means of payment")ayment")
-            print("2. Securities")es")
-            print("3. Non-financial asset")nancial asset")
+            # Get settlement type and denomination for non-bond entries
+            print("\nSelect settlement type:")
+            print("1. Means of payment")
+            print("2. Securities")
+            print("3. Non-financial asset")
             print("4. Services")
             print("5. Crypto")
             print("6. None")
-            settlement_idx = int(input("Enter choice (1-6): ")) - 1            settlement_idx = int(input("Enter choice (1-6): ")) - 1
-            settlement_type = list(SettlementType)[settlement_idx]settlement_type = list(SettlementType)[settlement_idx]
-            settlement_denomination = input("Enter settlement denomination (e.g., USD, EUR): ")ut("Enter settlement denomination (e.g., USD, EUR): ")
+            settlement_idx = int(input("Enter choice (1-6): ")) - 1
+            settlement_type = list(SettlementType)[settlement_idx]
+            settlement_denomination = input("Enter settlement denomination (e.g., USD, EUR): ")
 
         try:
-            # Create asset-liability pairair
-            pair = AssetLiabilityPair(ityPair(
+            # Create asset-liability pair
+            pair = AssetLiabilityPair(
                 time=datetime.now(),
                 type=entry_type.value,
                 amount=amount,
                 denomination=denomination,
                 maturity_type=maturity_type,
-                maturity_date=maturity_date,e,
+                maturity_date=maturity_date,
                 settlement_type=settlement_type,
-                settlement_denomination=settlement_denomination,ination=settlement_denomination,
-                asset_holder=asset_holder,older,
-                liability_holder=liability_holder,ity_holder,
-                asset_name=None,   asset_name=None,
-                bond_type=bond_type,                bond_type=bond_type,
+                settlement_denomination=settlement_denomination,
+                asset_holder=asset_holder,
+                liability_holder=liability_holder,
+                asset_name=None,
+                bond_type=bond_type,
                 coupon_rate=coupon_rate
             )
 
-            self.create_asset_liability_pair(pair)ir(pair)
-            if entry_type in [EntryType.BOND_ZERO_COUPON, EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:Type.BOND_COUPON, EntryType.BOND_AMORTIZING]:
-                print("\nBond created successfully!")sfully!")
+            self.create_asset_liability_pair(pair)
+            if entry_type in [EntryType.BOND_ZERO_COUPON, EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
+                print("\nBond created successfully!")
                 # Display payment schedule
                 schedule = pair._create_bond_payment_schedule()
-                print("\nPayment schedule:")rint("\nPayment schedule:")
+                print("\nPayment schedule:")
                 for date, amount, payment_type in schedule:
-                    print(f"- {date.strftime('%Y')}: {amount} {denomination} ({payment_type})")        print(f"- {date.strftime('%Y')}: {amount} {denomination} ({payment_type})")
+                    print(f"- {date.strftime('%Y')}: {amount} {denomination} ({payment_type})")
             else:
                 print("\nAsset-liability pair created successfully!")
             
-        except ValueError as e:        except ValueError as e:
-            print(f"\nError creating asset-liability pair: {str(e)}")r creating asset-liability pair: {str(e)}")
-            returnurn
+        except ValueError as e:
+            print(f"\nError creating asset-liability pair: {str(e)}")
+            return
 
 if __name__ == "__main__":
-    def main():    def main():
-        # Initialize the economic systeme the economic system
+    def main():
+        # Initialize the economic system
         system = EconomicSystem()
 
         while True:
             print("\nAvailable actions:")
             print("1. Add new agent")
-            print("2. Create asset-liability pair") pair")
-            print("3. Display balance sheets")y balance sheets")
-            print("4. Run simulation to t1")            print("4. Run simulation to t1")
-            print("5. Run simulation to t2")t("5. Run simulation to t2")
+            print("2. Create asset-liability pair")
+            print("3. Display balance sheets")
+            print("4. Run simulation to t1")
+            print("5. Run simulation to t2")
             print("6. Exit")
 
             try:
-                choice = int(input("\nSelect action (enter number): "))on (enter number): "))
+                choice = int(input("\nSelect action (enter number): "))
                 
                 if choice == 1:
-                    print("\nSelect agent type:") type:")
+                    print("\nSelect agent type:")
                     print("1. Bank")
                     print("2. Company")
-                    print("3. Household")ld")
-                    print("4. Treasury")print("4. Treasury")
+                    print("3. Household")
+                    print("4. Treasury")
                     print("5. Central Bank")
                     print("6. Other")
                     
-                    agent_type_idx = int(input("Enter choice (1-6): ")) - 16): ")) - 1
+                    agent_type_idx = int(input("Enter choice (1-6): ")) - 1
                     agent_name = input("Enter agent name: ")
                     
                     agent_type = list(AgentType)[agent_type_idx]
-                    new_agent = Agent(agent_name, agent_type)                    new_agent = Agent(agent_name, agent_type)
-                    system.add_agent(new_agent)ent(new_agent)
-                    print(f"\nAgent {agent_name} ({agent_type.value}) added successfully!")e} ({agent_type.value}) added successfully!")
+                    new_agent = Agent(agent_name, agent_type)
+                    system.add_agent(new_agent)
+                    print(f"\nAgent {agent_name} ({agent_type.value}) added successfully!")
 
-                elif choice == 2::
+                elif choice == 2:
                     if len(system.agents) < 2:
-                        print("\nError: Need at least 2 agents to create an asset-liability pair!")                        print("\nError: Need at least 2 agents to create an asset-liability pair!")
+                        print("\nError: Need at least 2 agents to create an asset-liability pair!")
                         continue
-                    system.create_asset_liability_pair_interactive()_pair_interactive()
+                    system.create_asset_liability_pair_interactive()
 
                 elif choice == 3:
-                    print("\nSelect time point:")t time point:")
+                    print("\nSelect time point:")
                     print("1. t0")
                     print("2. t1")
                     print("3. t2")
-                    time_idx = int(input("Enter choice (1-3): "))                    time_idx = int(input("Enter choice (1-3): "))
-                    time_point = ['t0', 't1', 't2'][time_idx - 1]['t0', 't1', 't2'][time_idx - 1]
-                    system.display_balance_sheets(time_point)ts(time_point)
+                    time_idx = int(input("Enter choice (1-3): "))
+                    time_point = ['t0', 't1', 't2'][time_idx - 1]
+                    system.display_balance_sheets(time_point)
 
                 elif choice == 4:
-                    if system.run_simulation():                    if system.run_simulation():
-                        system.settle_entries('t1')ttle_entries('t1')
-                        print("Simulation to t1 completed")ted")
+                    if system.run_simulation():
+                        system.settle_entries('t1')
+                        print("Simulation to t1 completed")
 
-                elif choice == 5::
-                    if 't1' not in system.time_states:states:
-                        print("\nError: Must run simulation to t1 first!")tion to t1 first!")
-                        continue                        continue
-                    system.settle_entries('t2')_entries('t2')
-                    print("Simulation to t2 completed")eted")
+                elif choice == 5:
+                    if 't1' not in system.time_states:
+                        print("\nError: Must run simulation to t1 first!")
+                        continue
+                    system.settle_entries('t2')
+                    print("Simulation to t2 completed")
 
-                elif choice == 6:                elif choice == 6:
-                    print("\nExiting program...")rint("\nExiting program...")
+                elif choice == 6:
+                    print("\nExiting program...")
                     break
 
                 else:
-                    print("\nInvalid choice!")!")
+                    print("\nInvalid choice!")
 
             except ValueError as e:
-                print(f"\nError: {str(e)}")                print(f"\nError: {str(e)}")
-            except Exception as e:  except Exception as e:
-                print(f"\nUnexpected error: {str(e)}")                print(f"\nUnexpected error: {str(e)}")
+                print(f"\nError: {str(e)}")
+            except Exception as e:
+                print(f"\nUnexpected error: {str(e)}")
 
-
-
-    main()
-    main()
+    main() 
