@@ -77,7 +77,7 @@ class BalanceSheetEntry:
     maturity_type: MaturityType
     maturity_date: Optional[int]  # Required for FIXED_DATE, None for others
     settlement_details: SettlementDetails
-    cash_flow_at_maturity: float
+    cash_flow_at_maturity: float = 0
     name: Optional[str] = None  # For non-financial assets or special naming
     issuance_time: int = 0  # Time the entry was created
     current_book_value: float = 0 
@@ -88,7 +88,7 @@ class BalanceSheetEntry:
             self.type == other.type and
             self.is_asset == other.is_asset and
             self.counterparty == other.counterparty and
-            self.current_book_value == other.current_book_value and
+            self.initial_book_value == other.initial_book_value and
             self.denomination == other.denomination and
             self.maturity_type == other.maturity_type and
             self.maturity_date == other.maturity_date and
@@ -162,10 +162,10 @@ class Agent:
         }
 
     def get_total_assets(self) -> float:
-        return sum(entry.amount for entry in self.assets)
+        return sum(entry.current_book_value for entry in self.assets)
 
     def get_total_liabilities(self) -> float:
-        return sum(entry.amount for entry in self.liabilities)
+        return sum(entry.current_book_value for entry in self.liabilities)
 
     def get_net_worth(self) -> float:
         return self.get_total_assets() - self.get_total_liabilities()
@@ -221,6 +221,7 @@ class AssetLiabilityPair:
                  settlement_denomination: str,
                  asset_holder: Agent,
                  liability_holder: Optional[Agent] = None,
+                 cash_flow_at_maturity: Optional[float] = 0,
                  asset_name: Optional[str] = None):  # New parameter for non-financial asset names
         self.time = time
         self.type = type
@@ -228,6 +229,7 @@ class AssetLiabilityPair:
         self.denomination = denomination
         self.maturity_type = maturity_type
         self.maturity_date = maturity_date
+        self.cash_flow_at_maturity = cash_flow_at_maturity
         self.settlement_details = SettlementDetails(
             type=settlement_type,
             denomination=settlement_denomination
@@ -267,7 +269,8 @@ class AssetLiabilityPair:
                 maturity_date=self.maturity_date,
                 settlement_details=settlement_details,
                 name=self.asset_name,  # Name of the asset to be delivered
-                issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0
+                issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0,
+                cash_flow_at_maturity=self.cash_flow_at_maturity
             )
 
             # Create delivery promise (liability)
@@ -281,7 +284,8 @@ class AssetLiabilityPair:
                 maturity_date=self.maturity_date,
                 settlement_details=settlement_details,
                 name=self.asset_name,  # Name of the asset to be delivered
-                issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0
+                issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0,
+                cash_flow_at_maturity=self.cash_flow_at_maturity
             )
 
             return asset_entry, liability_entry
@@ -304,7 +308,8 @@ class AssetLiabilityPair:
                 maturity_date=self.maturity_date,
                 settlement_details=settlement_details,
                 name=self.asset_name,
-                issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0
+                issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0,
+                cash_flow_at_maturity=self.cash_flow_at_maturity
             )
 
             # Create payable (liability)
@@ -318,7 +323,8 @@ class AssetLiabilityPair:
                 maturity_date=self.maturity_date,
                 settlement_details=settlement_details,
                 name=None,
-                issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0
+                issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0,
+                cash_flow_at_maturity=self.cash_flow_at_maturity
             )
 
             return asset_entry, liability_entry
@@ -335,7 +341,8 @@ class AssetLiabilityPair:
                 maturity_date=self.maturity_date,
                 settlement_details=self.settlement_details,
                 name=self.asset_name,
-                issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0
+                issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0,
+                cash_flow_at_maturity=self.cash_flow_at_maturity
             )
             return asset_entry, None
 
@@ -350,7 +357,8 @@ class AssetLiabilityPair:
             maturity_date=self.maturity_date,
             settlement_details=self.settlement_details,
             name=self.asset_name,
-            issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0
+            issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0,
+            cash_flow_at_maturity=self.cash_flow_at_maturity
         )
 
         liability_entry = BalanceSheetEntry(
@@ -363,7 +371,8 @@ class AssetLiabilityPair:
             maturity_date=self.maturity_date,
             settlement_details=self.settlement_details,
             name=None,  # Liabilities don't need names
-            issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0
+            issuance_time=self.current_time_state if hasattr(self, 'current_time_state') else 0,
+            cash_flow_at_maturity=self.cash_flow_at_maturity
         )
 
         return asset_entry, liability_entry
@@ -447,7 +456,7 @@ class EconomicSystem:
                         debtor_deposit = next(
                             (asset for asset in pair.liability_holder.assets
                              if asset.type == EntryType.DEPOSIT
-                             and asset.amount >= pair.amount
+                             and asset.initial_book_value >= pair.amount
                              and asset.denomination == pair.denomination),
                             None
                         )
@@ -466,7 +475,7 @@ class EconomicSystem:
                             (l for l in bank.liabilities
                              if l.type == EntryType.DEPOSIT
                              and l.counterparty == pair.liability_holder.name
-                             and l.amount == debtor_deposit.amount),
+                             and l.initial_book_value == debtor_deposit.initial_book_value),
                             None
                         )
                         if bank_liability:
@@ -516,11 +525,11 @@ class EconomicSystem:
                         self.asset_liability_pairs.append(settlement_pair)
 
                         # If there was remaining deposit amount, create a new deposit for the remainder
-                        if debtor_deposit.amount > pair.amount:
+                        if debtor_deposit.initial_book_value > pair.amount:
                             remainder_pair = AssetLiabilityPair(
                                 time=datetime.now(),
                                 type=EntryType.DEPOSIT.value,
-                                amount=debtor_deposit.amount - pair.amount,
+                                amount=debtor_deposit.initial_book_value - pair.amount,
                                 denomination=pair.denomination,
                                 maturity_type=MaturityType.ON_DEMAND,
                                 maturity_date=None,
@@ -549,7 +558,7 @@ class EconomicSystem:
                             (asset for asset in pair.liability_holder.assets
                              if asset.type == EntryType.NON_FINANCIAL
                              and asset.name == pair.asset_name
-                             and asset.amount >= pair.amount),
+                             and asset.initial_book_value >= pair.amount),
                             None
                         )
 
@@ -598,11 +607,11 @@ class EconomicSystem:
                         self.asset_liability_pairs.append(settlement_pair)
 
                         # If there was remaining amount in the non-financial asset, create a new entry for it
-                        if non_financial_asset.amount > pair.amount:
+                        if non_financial_asset.initial_book_value > pair.amount:
                             remainder_pair = AssetLiabilityPair(
                                 time=datetime.now(),
                                 type=EntryType.NON_FINANCIAL.value,
-                                amount=non_financial_asset.amount - pair.amount,
+                                amount=non_financial_asset.initial_book_value - pair.amount,
                                 denomination=non_financial_asset.denomination,
                                 maturity_type=MaturityType.ON_DEMAND,
                                 maturity_date=None,
@@ -715,17 +724,18 @@ class EconomicSystem:
         """Check if an agent can settle a liability"""
         if entry.settlement_details.type == SettlementType.MEANS_OF_PAYMENT:
             # Check for sufficient deposits
-            deposits = sum(asset.amount for asset in agent.assets
+            deposits = sum(asset.initial_book_value for asset in agent.assets
                           if asset.type == EntryType.DEPOSIT
+                          and asset.is_asset
                           and asset.denomination == entry.denomination)
-            if deposits < entry.amount:
-                return False, f"Insufficient deposits: has {deposits} {entry.denomination}, needs {entry.amount}"
+            if deposits < entry.initial_book_value:
+                return False, f"Insufficient deposits: has {deposits} {entry.denomination}, needs {entry.initial_book_value}"
 
         elif entry.settlement_details.type == SettlementType.NON_FINANCIAL_ASSET:
             # Check for required non-financial asset
             has_asset = any(asset.type == EntryType.NON_FINANCIAL
                            and asset.name == entry.name
-                           and asset.amount >= entry.amount
+                           and asset.initial_book_value >= entry.initial_book_value
                            for asset in agent.assets)
             if not has_asset:
                 return False, f"Missing required non-financial asset: {entry.name}"
@@ -739,7 +749,7 @@ class EconomicSystem:
             type=EntryType.DEFAULT,
             is_asset=True,
             counterparty=failed_entry.counterparty,
-            initial_book_value=failed_entry.amount,
+            initial_book_value=failed_entry.initial_book_value,
             denomination=failed_entry.denomination,
             maturity_type=MaturityType.ON_DEMAND,
             maturity_date=None,
@@ -753,7 +763,7 @@ class EconomicSystem:
             type=EntryType.DEFAULT,
             is_asset=False,
             counterparty=failed_entry.counterparty,
-            initial_book_value=failed_entry.amount,
+            initial_book_value=failed_entry.initial_book_value,
             denomination=failed_entry.denomination,
             maturity_type=MaturityType.ON_DEMAND,
             maturity_date=None,
@@ -791,8 +801,17 @@ class EconomicSystem:
                                       if a.name == liability.counterparty)
 
                     # Remove the original asset-liability pair
-                    asset_entry = next(a for a in asset_holder.assets
+                    try:
+                        asset_entry = next(a for a in asset_holder.assets
                                      if a.matches(liability))
+                    except StopIteration:
+                        print("\nCould not find matching asset for liability during default.")
+                        print("Liability being matched:")
+                        print(vars(liability))
+                        print("\nAll candidate assets:")
+                        for a in asset_holder.assets:
+                            print(vars(a))
+                        raise
                     asset_holder.remove_asset(asset_entry)
                     agent.remove_liability(liability)
 
@@ -806,7 +825,8 @@ class EconomicSystem:
                     return False  # Stop simulation
 
             # If we get here, try to settle all entries for this time point
-            self.settle_entries(time)
+            if time > 0:
+                self.settle_entries(time)
 
         print("\nSimulation completed successfully!")
         return True
@@ -827,9 +847,9 @@ class EconomicSystem:
                 for settlement in agent.settlement_history['as_asset_holder']:
                     print(f"\n    Time: {settlement['time_point']}")
                     print(f"    Original Asset: {settlement['original_entry'].type.value} "
-                          f"of {settlement['original_entry'].amount} {settlement['original_entry'].denomination}")
+                          f"of {settlement['original_entry'].initial_book_value} {settlement['original_entry'].denomination}")
                     print(f"    Settled For: {settlement['settlement_result'].type.value} "
-                          f"of {settlement['settlement_result'].amount} {settlement['settlement_result'].denomination}")
+                          f"of {settlement['settlement_result'].initial_book_value} {settlement['settlement_result'].denomination}")
                     print(f"    Counterparty: {settlement['counterparty']}")
 
             # Display settlements where agent was liability holder
@@ -838,9 +858,9 @@ class EconomicSystem:
                 for settlement in agent.settlement_history['as_liability_holder']:
                     print(f"\n    Time: {settlement['time_point']}")
                     print(f"    Original Liability: {settlement['original_entry'].type.value} "
-                          f"of {settlement['original_entry'].amount} {settlement['original_entry'].denomination}")
+                          f"of {settlement['original_entry'].initial_book_value} {settlement['original_entry'].denomination}")
                     print(f"    Settled With: {settlement['settlement_result'].type.value} "
-                          f"of {settlement['settlement_result'].amount} {settlement['settlement_result'].denomination}")
+                          f"of {settlement['settlement_result'].initial_book_value} {settlement['settlement_result'].denomination}")
                     print(f"    Counterparty: {settlement['counterparty']}")
 
             if (not agent.settlement_history.get('as_asset_holder') and
@@ -854,7 +874,7 @@ class EconomicSystem:
             return
 
         current_agents = self.get_agents_at_time(time_point).values()
-        print(f"\nBalance sheets at {time_point}:")
+        print(f"\nBalance sheets at t{time_point}:")
 
         for agent in current_agents:
             print(f"\n{agent.name} ({agent.type.value}):")
@@ -880,7 +900,7 @@ class EconomicSystem:
 
                 print(f"  - {entry_type}: {asset.current_book_value} {asset.denomination} "
                       f"(from {asset.counterparty if asset.counterparty else 'N/A'})"
-                      f"{maturity_info} [issued at {asset.issuance_time}]")
+                      f"{maturity_info} [issued at t{asset.issuance_time}]")
 
             print("Liabilities:")
             for liability in agent.liabilities:
@@ -902,18 +922,18 @@ class EconomicSystem:
 
                 print(f"  - {entry_type}: {liability.current_book_value} {liability.denomination} "
                       f"(to {liability.counterparty}){maturity_info} "
-                      f"[issued at {liability.issuance_time}]")
+                      f"[issued at t{liability.issuance_time}]")
 
 class ExcelExporter:
     def __init__(self, system: EconomicSystem):
         self.system = system
 
-    def create_t_table(self, sheet, row_start: int, col_start: int, agent: Agent, time_point: str):
+    def create_t_table(self, sheet, row_start: int, col_start: int, agent: Agent, time_point: int):
         thick = Side(style='thick', color='000000')
 
         # Add time point header
         time_header = sheet.cell(row=row_start, column=1)
-        time_header.value = f"Time: {time_point}"
+        time_header.value = f"Time: t{time_point}"
         time_header.alignment = Alignment(horizontal="center")
         time_header.font = openpyxl.styles.Font(bold=True)
 
@@ -945,15 +965,11 @@ class ExcelExporter:
         current_row = row_start + 2
         for entry in agent.assets:
             # Skip entries that were issued after the current time point
-            time_points = ['t0', 't1', 't2']
-            if time_points.index(entry.issuance_time) > time_points.index(time_point):
+            if entry.issuance_time > time_point:
                 continue
-
-            # Skip matured entries if not at t0
-            if time_point != 't0' and entry.maturity_type == MaturityType.FIXED_DATE:
-                entry_time = 't1' if entry.maturity_date.year == 2050 else 't2'
-                if time_point > entry_time:
-                    continue
+            # Skip already matured entries
+            if entry.maturity_type == MaturityType.FIXED_DATE and entry.maturity_date and time_point > entry.maturity_date:
+                continue
 
             # Show entry details
             entry_type = "receivable" if entry.type == EntryType.PAYABLE else entry.type.value
@@ -961,11 +977,11 @@ class ExcelExporter:
                 entry_type = f"{entry.type.value} ({entry.name})"
             sheet.cell(row=current_row, column=col_start).value = entry_type
             sheet.cell(row=current_row, column=col_start + 1).value = entry.counterparty if entry.counterparty else "N/A"
-            sheet.cell(row=current_row, column=col_start + 2).value = f"+{entry.amount} {entry.denomination}"
+            sheet.cell(row=current_row, column=col_start + 2).value = f"+{entry.initial_book_value} {entry.denomination}"
 
             maturity = entry.maturity_type.value
-            if entry.maturity_type == MaturityType.FIXED_DATE:
-                maturity = 't1' if entry.maturity_date.year == 2050 else 't2'
+            if entry.maturity_type == MaturityType.FIXED_DATE and entry.maturity_date is not None:
+                maturity = f"t{time_point}"
             sheet.cell(row=current_row, column=col_start + 3).value = f"{maturity} (issued at {entry.issuance_time})"
 
             settlement = entry.settlement_details.type.value
@@ -978,15 +994,11 @@ class ExcelExporter:
         current_row = row_start + 2
         for entry in agent.liabilities:
             # Skip entries that were issued after the current time point
-            time_points = ['t0', 't1', 't2']
-            if time_points.index(entry.issuance_time) > time_points.index(time_point):
+            if entry.issuance_time > time_point:
                 continue
-
-            # Skip matured entries if not at t0
-            if time_point != 't0' and entry.maturity_type == MaturityType.FIXED_DATE:
-                entry_time = 't1' if entry.maturity_date.year == 2050 else 't2'
-                if time_point > entry_time:
-                    continue
+            # Skip already matured entries
+            if entry.maturity_type == MaturityType.FIXED_DATE and entry.maturity_date and time_point > entry.maturity_date:
+                continue
 
             # Show entry details
             entry_type = entry.type.value
@@ -994,11 +1006,11 @@ class ExcelExporter:
                 entry_type = f"delivery promise for {entry.name}" if entry.name else "delivery promise"
             sheet.cell(row=current_row, column=col_start + 5).value = entry_type
             sheet.cell(row=current_row, column=col_start + 6).value = entry.counterparty
-            sheet.cell(row=current_row, column=col_start + 7).value = f"+{entry.amount} {entry.denomination}"
+            sheet.cell(row=current_row, column=col_start + 7).value = f"+{entry.initial_book_value} {entry.denomination}"
 
             maturity = entry.maturity_type.value
             if entry.maturity_type == MaturityType.FIXED_DATE:
-                maturity = 't1' if entry.maturity_date.year == 2050 else 't2'
+                maturity = f"t{entry.maturity_date}"
             sheet.cell(row=current_row, column=col_start + 8).value = f"{maturity} (issued at {entry.issuance_time})"
 
             settlement = entry.settlement_details.type.value
@@ -1019,7 +1031,7 @@ class ExcelExporter:
 
         return total_row + 4
 
-    def export_balance_sheets(self, filename: str):
+    def export_balance_sheets(self, filename: str, time: int):
         """Export balance sheets for all time points vertically stacked"""
         # First, ensure all settlements are processed
         if self.system.simulation_finalized:
@@ -1029,10 +1041,10 @@ class ExcelExporter:
 
             # Process settlements if not already done
             try:
-                if 't1' not in self.system.time_states:
-                    self.system.settle_entries('t1')
-                if 't2' not in self.system.time_states:
-                    self.system.settle_entries('t2')
+                if time not in self.system.time_states:
+                    self.system.settle_entries(time)
+                if time not in self.system.time_states:
+                    self.system.settle_entries(time)
             except Exception as e:
                 print(f"\nWarning: Settlement processing failed ({str(e)})")
 
@@ -1045,9 +1057,8 @@ class ExcelExporter:
         sheet.title = "Balance Sheets Over Time"
 
         current_row = 1
-        time_points = self.system.get_time_points()
 
-        for time_point in time_points:
+        for time_point in range(time + 1):
             agents = (self.system.time_states[time_point].values()
                      if time_point in self.system.time_states
                      else self.system.agents.values())
@@ -1068,7 +1079,7 @@ class ExcelExporter:
 
             # Add system totals for this time point
             system_total_row = max_row_in_timepoint
-            sheet.cell(row=system_total_row, column=1).value = f"System Totals at {time_point}:"
+            sheet.cell(row=system_total_row, column=1).value = f"System Totals at t{time_point}:"
             sheet.cell(row=system_total_row + 1, column=1).value = "Total Assets:"
             sheet.cell(row=system_total_row + 1, column=2).value = sum(agent.get_total_assets() for agent in agents)
             sheet.cell(row=system_total_row + 2, column=1).value = "Total Liabilities:"
@@ -1214,6 +1225,13 @@ def create_asset_liability_pair_interactive(system: EconomicSystem, default_deno
                 else:
                     denomination = input("Enter denomination (e.g., USD): ")
 
+                try:
+                    cash_flow_input = input("Enter cash flow at maturity (press Enter to use amount): ").strip()
+                    cash_flow_at_maturity = float(cash_flow_input) if cash_flow_input else None
+                except ValueError:
+                    print("Invalid number. Using default.")
+                    cash_flow_at_maturity = 0
+
                 # Get maturity information
                 print("\nSelect maturity type:")
                 for i, mt in enumerate(MaturityType, 1):
@@ -1240,7 +1258,8 @@ def create_asset_liability_pair_interactive(system: EconomicSystem, default_deno
                     settlement_denomination=denomination,
                     asset_holder=asset_holder,
                     liability_holder=liability_holder,
-                    asset_name=asset_name
+                    asset_name=asset_name,
+                    cash_flow_at_maturity=cash_flow_at_maturity
                 )
 
                 system.create_asset_liability_pair(pair)
@@ -1367,11 +1386,14 @@ def main():
 
         elif choice == '3':
             if system.simulation_finalized:
-                time_point = input(f"\nEnter time point in range 0 to {system.final_time_state} to view: ").strip().lower()
-                if time_point >= 0:
-                    system.display_balance_sheets(time_point)
-                else:
-                    print("\nInvalid time point. Please enter a non-negative integer")
+                try:
+                    time_point = int(input(f"\nEnter time point in range 0 to {system.final_time_state} to view: ").strip().lower())
+                    if time_point >= 0:
+                        system.display_balance_sheets(time_point)
+                    else:
+                        print("\nInvalid time point. Please enter a non-negative integer")
+                except TypeError:
+                    print("Please input an integer 0,1,2...")
             else:
                 system.display_balance_sheets(0)
 
@@ -1403,7 +1425,7 @@ def main():
             if EXCEL_AVAILABLE:
                 filename = "balance_sheets.xlsx"
                 exporter = ExcelExporter(system)
-                exporter.export_balance_sheets(filename)
+                exporter.export_balance_sheets(filename, system.final_time_state)
             else:
                 print("\nError: Excel export is not available. Please install openpyxl package.")
                 print("Run: pip install openpyxl==3.1.2")
