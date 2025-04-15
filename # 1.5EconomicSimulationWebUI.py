@@ -9,6 +9,10 @@ from datetime import datetime, timedelta
 import base64
 from copy import deepcopy
 from flask import send_file,flash,url_for,Flask, request, render_template_string, redirect,session
+import json
+import uuid
+from pathlib import Path
+
 try:
     import openpyxl
     from openpyxl.styles import Alignment, Border, Side
@@ -107,6 +111,28 @@ class BalanceSheetEntry:
         # Validate payable rules
         if self.type == EntryType.PAYABLE and self.settlement_details.type != SettlementType.MEANS_OF_PAYMENT:
             raise ValueError("Payable entries must have means_of_payment settlement type")
+        
+        if isinstance(self.maturity_type, str):
+            self.maturity_type = MaturityType(self.maturity_type)
+        if isinstance(self.settlement_details, dict):
+            self.settlement_details = SettlementDetails(**self.settlement_details)
+
+    def to_dict(self):
+        return {
+            "type": self.type.value,
+            "is_asset": self.is_asset,
+            "counterparty": self.counterparty,
+            "amount": self.amount,
+            "denomination": self.denomination,
+            "maturity_type": self.maturity_type.value,
+            "maturity_date": self.maturity_date.isoformat() if self.maturity_date else None,
+            "settlement_details": {
+                "type": self.settlement_details.type.value,
+                "denomination": self.settlement_details.denomination
+            },
+            "name": self.name,
+            "issuance_time": self.issuance_time
+        }
 
 class SettlementFailure(Exception):
     def __init__(self, agent_name: str, entry: BalanceSheetEntry, reason: str):
@@ -194,6 +220,36 @@ class Agent:
             self.settlement_history['as_asset_holder'].append(settlement_record)
         else:
             self.settlement_history['as_liability_holder'].append(settlement_record)
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "type": self.type.value,
+            "assets": [a.to_dict() for a in self.assets],  # 正确调用 to_dict
+            "liabilities": [l.to_dict() for l in self.liabilities],
+            "settlement_history": {
+                'as_asset_holder': [
+                    {
+                        'time_point': r['time_point'],
+                        'original_entry': r['original_entry'].to_dict(),
+                        'settlement_result': r['settlement_result'].to_dict(),
+                        'counterparty': r['counterparty'],
+                        'timestamp': r['timestamp'].isoformat()
+                    } for r in self.settlement_history['as_asset_holder']
+                ],
+                'as_liability_holder': [
+                    {
+                        'time_point': r['time_point'],
+                        'original_entry': r['original_entry'].to_dict(),
+                        'settlement_result': r['settlement_result'].to_dict(),
+                        'counterparty': r['counterparty'],
+                        'timestamp': r['timestamp'].isoformat()
+                    } for r in self.settlement_history['as_liability_holder']
+                ]
+            },
+            "creation_time": self.creation_time.isoformat()
+        }
+    
 class AssetLiabilityPair:
     def __init__(self,
                  time: datetime,
@@ -352,6 +408,21 @@ class AssetLiabilityPair:
         )
 
         return asset_entry, liability_entry
+    
+    def to_dict(self):
+        return {
+            "time": self.time.isoformat(),
+            "type": self.type,
+            "amount": self.amount,
+            "denomination": self.denomination,
+            "maturity_type": self.maturity_type.value,
+            "maturity_date": self.maturity_date.isoformat() if self.maturity_date else None,
+            "settlement_type": self.settlement_details.type.value,
+            "settlement_denomination": self.settlement_details.denomination,
+            "asset_holder": self.asset_holder.name,
+            "liability_holder": self.liability_holder.name if self.liability_holder else None,
+            "asset_name": self.asset_name
+        }
 
 class EconomicSystem:
     def __init__(self):
@@ -874,6 +945,245 @@ class EconomicSystem:
                 print(f"  - {entry_type}: {liability.amount} {liability.denomination} "
                       f"(to {liability.counterparty}){maturity_info} "
                       f"[issued at {liability.issuance_time}]")
+    
+    def to_dict(self):
+        return {
+            "agents": {name: agent.to_dict() for name, agent in self.agents.items()},
+            "asset_liability_pairs": [pair.to_dict() for pair in self.asset_liability_pairs],
+            "time_states": {
+                tp: {
+                    agent_name: {
+                        "type": agent_state.type.value,
+                        "assets": [a.to_dict() for a in agent_state.assets],
+                        "liabilities": [l.to_dict() for l in agent_state.liabilities],
+                        "creation_time": agent_state.creation_time.isoformat()  # 确保转换
+                    } for agent_name, agent_state in agents.items()
+                } for tp, agents in self.time_states.items()
+            }
+        }
+
+    def _pair_to_dict(self, pair):
+        return {
+            "time": pair.time.isoformat(),
+            "type": pair.type,
+            "amount": pair.amount,
+            "denomination": pair.denomination,
+            "maturity_type": pair.maturity_type.value,
+            "maturity_date": pair.maturity_date.isoformat() if pair.maturity_date else None,
+            "settlement_type": pair.settlement_details.type.value,
+            "settlement_denomination": pair.settlement_details.denomination,
+            "asset_holder": pair.asset_holder.name,
+            "liability_holder": pair.liability_holder.name if pair.liability_holder else None,
+            "asset_name": pair.asset_name
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        system = cls()
+        
+        # 反序列化Agents
+        for agent_name, agent_data in data["agents"].items():
+            if "type" not in agent_data:
+                raise ValueError(f"Agent {agent_name} is missing 'type' field in configuration data. Agent data: {agent_data}")
+            try:
+                agent_type = AgentType(agent_data["type"])
+            except ValueError as e:
+                raise ValueError(f"Invalid agent type '{agent_data['type']}' for agent {agent_name}") from e
+            
+            agent = Agent(
+                name=agent_data["name"],
+                agent_type=agent_type
+            )
+            agent.creation_time = datetime.fromisoformat(agent_data["creation_time"])
+            agent.status = agent_data.get("status", "operating")
+            
+            # 反序列化资产
+            agent.assets = [
+                BalanceSheetEntry(
+                    type=EntryType(asset["type"]),
+                    is_asset=asset["is_asset"],
+                    counterparty=asset["counterparty"],
+                    amount=asset["amount"],
+                    denomination=asset["denomination"],
+                    maturity_type=MaturityType(asset["maturity_type"]),
+                    maturity_date=datetime.fromisoformat(asset["maturity_date"]) if asset["maturity_date"] else None,
+                    settlement_details=SettlementDetails(
+                        type=SettlementType(asset["settlement_details"]["type"]),
+                        denomination=asset["settlement_details"]["denomination"]
+                    ),
+                    name=asset["name"],
+                    issuance_time=asset["issuance_time"]
+                ) for asset in agent_data["assets"]
+            ]
+            
+            # 反序列化负债
+            agent.liabilities = [
+                BalanceSheetEntry(
+                    type=EntryType(liab["type"]),
+                    is_asset=liab["is_asset"],
+                    counterparty=liab["counterparty"],
+                    amount=liab["amount"],
+                    denomination=liab["denomination"],
+                    maturity_type=MaturityType(liab["maturity_type"]),
+                    maturity_date=datetime.fromisoformat(liab["maturity_date"]) if liab["maturity_date"] else None,
+                    settlement_details=SettlementDetails(
+                        type=SettlementType(liab["settlement_details"]["type"]),
+                        denomination=liab["settlement_details"]["denomination"]
+                    ),
+                    name=liab["name"],
+                    issuance_time=liab["issuance_time"]
+                ) for liab in agent_data["liabilities"]
+            ]
+            
+            # 反序列化结算历史
+            agent.settlement_history = {
+                'as_asset_holder': [
+                    {
+                        'time_point': record['time_point'],
+                        'original_entry': BalanceSheetEntry(
+                            type=EntryType(record['original_entry']['type']),
+                            is_asset=record['original_entry']['is_asset'],
+                            counterparty=record['original_entry']['counterparty'],
+                            amount=record['original_entry']['amount'],
+                            denomination=record['original_entry']['denomination'],
+                            maturity_type=MaturityType(record['original_entry']['maturity_type']),
+                            maturity_date=datetime.fromisoformat(record['original_entry']['maturity_date']) if record['original_entry']['maturity_date'] else None,
+                            settlement_details=SettlementDetails(
+                                type=SettlementType(record['original_entry']['settlement_details']['type']),
+                                denomination=record['original_entry']['settlement_details']['denomination']
+                            ),
+                            name=record['original_entry']['name'],
+                            issuance_time=record['original_entry']['issuance_time']
+                        ),
+                        'settlement_result': BalanceSheetEntry(
+                            type=EntryType(record['settlement_result']['type']),
+                            is_asset=record['settlement_result']['is_asset'],
+                            counterparty=record['settlement_result']['counterparty'],
+                            amount=record['settlement_result']['amount'],
+                            denomination=record['settlement_result']['denomination'],
+                            maturity_type=MaturityType(record['settlement_result']['maturity_type']),
+                            maturity_date=datetime.fromisoformat(record['settlement_result']['maturity_date']) if record['settlement_result']['maturity_date'] else None,
+                            settlement_details=SettlementDetails(
+                                type=SettlementType(record['settlement_result']['settlement_details']['type']),
+                                denomination=record['settlement_result']['settlement_details']['denomination']
+                            ),
+                            name=record['settlement_result']['name'],
+                            issuance_time=record['settlement_result']['issuance_time']
+                        ),
+                        'counterparty': record['counterparty'],
+                        'timestamp': datetime.fromisoformat(record['timestamp'])
+                    } for record in agent_data['settlement_history']['as_asset_holder']
+                ],
+                'as_liability_holder': [
+                    {
+                        'time_point': record['time_point'],
+                        'original_entry': BalanceSheetEntry(
+                            type=EntryType(record['original_entry']['type']),
+                            is_asset=record['original_entry']['is_asset'],
+                            counterparty=record['original_entry']['counterparty'],
+                            amount=record['original_entry']['amount'],
+                            denomination=record['original_entry']['denomination'],
+                            maturity_type=MaturityType(record['original_entry']['maturity_type']),
+                            maturity_date=datetime.fromisoformat(record['original_entry']['maturity_date']) if record['original_entry']['maturity_date'] else None,
+                            settlement_details=SettlementDetails(
+                                type=SettlementType(record['original_entry']['settlement_details']['type']),
+                                denomination=record['original_entry']['settlement_details']['denomination']
+                            ),
+                            name=record['original_entry']['name'],
+                            issuance_time=record['original_entry']['issuance_time']
+                        ),
+                        'settlement_result': BalanceSheetEntry(
+                            type=EntryType(record['settlement_result']['type']),
+                            is_asset=record['settlement_result']['is_asset'],
+                            counterparty=record['settlement_result']['counterparty'],
+                            amount=record['settlement_result']['amount'],
+                            denomination=record['settlement_result']['denomination'],
+                            maturity_type=MaturityType(record['settlement_result']['maturity_type']),
+                            maturity_date=datetime.fromisoformat(record['settlement_result']['maturity_date']) if record['settlement_result']['maturity_date'] else None,
+                            settlement_details=SettlementDetails(
+                                type=SettlementType(record['settlement_result']['settlement_details']['type']),
+                                denomination=record['settlement_result']['settlement_details']['denomination']
+                            ),
+                            name=record['settlement_result']['name'],
+                            issuance_time=record['settlement_result']['issuance_time']
+                        ),
+                        'counterparty': record['counterparty'],
+                        'timestamp': datetime.fromisoformat(record['timestamp'])
+                    } for record in agent_data['settlement_history']['as_liability_holder']
+                ]
+            }
+            system.agents[agent.name] = agent
+
+        # 反序列化AssetLiabilityPairs
+        system.asset_liability_pairs = []
+        for pair_data in data.get("asset_liability_pairs", []):
+            asset_holder = system.agents[pair_data["asset_holder"]]
+            liability_holder = system.agents[pair_data["liability_holder"]] if pair_data["liability_holder"] else None
+            
+            pair = AssetLiabilityPair(
+                time=datetime.fromisoformat(pair_data["time"]),
+                type=pair_data["type"],
+                amount=pair_data["amount"],
+                denomination=pair_data["denomination"],
+                maturity_type=MaturityType(pair_data["maturity_type"]),
+                maturity_date=datetime.fromisoformat(pair_data["maturity_date"]) if pair_data["maturity_date"] else None,
+                settlement_type=SettlementType(pair_data["settlement_type"]),
+                settlement_denomination=pair_data["settlement_denomination"],
+                asset_holder=asset_holder,
+                liability_holder=liability_holder,
+                asset_name=pair_data["asset_name"]
+            )
+            system.asset_liability_pairs.append(pair)
+
+        # 反序列化Time States
+        system.time_states = {}
+        for tp, agents_data in data.get("time_states", {}).items():
+            system.time_states[tp] = {}
+            for agent_name, agent_data in agents_data.items():
+                # 创建时间点特定的Agent副本
+                agent_type = AgentType(agent_data["type"])
+                agent_copy = Agent(agent_name, agent_type)
+                agent_copy.assets = [
+                    BalanceSheetEntry(
+                        type=EntryType(asset["type"]),
+                        is_asset=asset["is_asset"],
+                        counterparty=asset["counterparty"],
+                        amount=asset["amount"],
+                        denomination=asset["denomination"],
+                        maturity_type=MaturityType(asset["maturity_type"]),
+                        maturity_date=datetime.fromisoformat(asset["maturity_date"]) if asset["maturity_date"] else None,
+                        settlement_details=SettlementDetails(
+                            type=SettlementType(asset["settlement_details"]["type"]),
+                            denomination=asset["settlement_details"]["denomination"]
+                        ),
+                        name=asset["name"],
+                        issuance_time=asset["issuance_time"]
+                    ) for asset in agent_data["assets"]
+                ]
+                agent_copy.liabilities = [
+                    BalanceSheetEntry(
+                        type=EntryType(liab["type"]),
+                        is_asset=liab["is_asset"],
+                        counterparty=liab["counterparty"],
+                        amount=liab["amount"],
+                        denomination=liab["denomination"],
+                        maturity_type=MaturityType(liab["maturity_type"]),
+                        maturity_date=datetime.fromisoformat(liab["maturity_date"]) if liab["maturity_date"] else None,
+                        settlement_details=SettlementDetails(
+                            type=SettlementType(liab["settlement_details"]["type"]),
+                            denomination=liab["settlement_details"]["denomination"]
+                        ),
+                        name=liab["name"],
+                        issuance_time=liab["issuance_time"]
+                    ) for liab in agent_data["liabilities"]
+                ]
+                system.time_states[tp][agent_name] = agent_copy
+
+        # 恢复系统状态
+        system.current_time_state = data.get("current_time_state", "t0")
+        system.simulation_finalized = data.get("simulation_finalized", False)
+        
+        return system
 
 class ExcelExporter:
     def __init__(self, system: EconomicSystem):
@@ -1111,6 +1421,7 @@ HTML_BASE = '''
                     <a href="/batch" class="list-group-item list-group-item-action">Batch Upload</a>
                     <a href="/agents" class="list-group-item list-group-item-action">View Agents</a>
                     <a href="/settlement_history" class="list-group-item list-group-item-action">View Settlement History</a>
+                    <a href="/config" class="list-group-item list-group-item-action">Configurations</a>
                 </div>
             </div>
             <div class="col-md-8">
@@ -2094,6 +2405,128 @@ def delete_agent(name):
     del system.agents[name]
     flash("Agent deleted successfully", "success")
     return redirect(url_for('home'))
+
+
+CONFIG_DIR = Path("configs")
+CONFIG_DIR.mkdir(exist_ok=True)
+
+@app.route('/config')
+def config_manager():
+    configs = []
+    for config_file in CONFIG_DIR.glob("*.json"):
+        try:
+            with open(config_file) as f:
+                config_data = json.load(f)
+                configs.append({
+                    "id": config_file.stem,
+                    "name": config_data["name"],
+                    "timestamp": config_data["timestamp"],
+                    "agent_count": len(config_data["system"]["agents"]),
+                    "pair_count": len(config_data["system"]["asset_liability_pairs"])
+                })
+        except (json.JSONDecodeError, KeyError) as e:
+            app.logger.error(f"Error loading config {config_file}: {e}")
+            continue  # 跳过无效文件
+    return render_template_string(HTML_BASE + '''
+    <div class="card">
+        <div class="card-header d-flex justify-content-between">
+            <h4>Saved Configurations</h4>
+            <a href="/save_config" class="btn btn-primary">Save Current Config</a>
+        </div>
+        <div class="card-body">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Saved At</th>
+                        <th>Agents</th>
+                        <th>Pairs</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for config in configs %}
+                    <tr>
+                        <td>{{ config.name }}</td>
+                        <td>{{ config.timestamp }}</td>
+                        <td>{{ config.agent_count }}</td>
+                        <td>{{ config.pair_count }}</td>
+                        <td>
+                            <form action="/load_config/{{ config.id }}" method="post" class="d-inline">
+                                <button type="submit" class="btn btn-sm btn-success">Load</button>
+                            </form>
+                            <form action="/delete_config/{{ config.id }}" method="post" class="d-inline">
+                                <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    ''', configs=configs)
+
+
+@app.route('/save_config', methods=['GET', 'POST'])
+def save_config():
+    if request.method == 'GET':
+        return render_template_string(HTML_BASE + '''
+        <div class="card">
+            <div class="card-header">
+                <h4>Save Current Configuration</h4>
+            </div>
+            <div class="card-body">
+                <form method="POST">
+                    <div class="mb-3">
+                        <label class="form-label">Configuration Name</label>
+                        <input type="text" name="config_name" class="form-control" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </form>
+            </div>
+        </div>
+        ''')
+    
+    config_name = request.form["config_name"]
+    config_id = str(uuid.uuid4())
+    
+    config_data = {
+        "name": config_name,
+        "timestamp": datetime.now().isoformat(),
+        "system": system.to_dict()
+    }
+    
+    with open(CONFIG_DIR / f"{config_id}.json", "w") as f:
+        json.dump(config_data, f, indent=2)
+    
+    return redirect("/config")
+
+@app.route('/load_config/<config_id>', methods=['POST'])
+def load_config(config_id):
+    config_file = CONFIG_DIR / f"{config_id}.json"
+    with open(config_file) as f:
+        config_data = json.load(f)
+    
+    # Clear current system
+    system.agents.clear()
+    system.asset_liability_pairs.clear()
+    system.time_states.clear()
+    
+    # Rebuild from config
+    new_system = EconomicSystem.from_dict(config_data["system"])
+    system.agents = new_system.agents
+    system.asset_liability_pairs = new_system.asset_liability_pairs
+    system.time_states = new_system.time_states
+    
+    return redirect("/")
+
+@app.route('/delete_config/<config_id>', methods=['POST'])
+def delete_config(config_id):
+    config_file = CONFIG_DIR / f"{config_id}.json"
+    config_file.unlink()
+    return redirect("/config")
+
 
 # ======== 运行应用 ========
 if __name__ == '__main__':
