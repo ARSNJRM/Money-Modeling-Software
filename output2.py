@@ -76,6 +76,8 @@ class BalanceSheetEntry:
     settlement_details: SettlementDetails
     name: Optional[str] = None  # For non-financial assets or special naming
     issuance_time: str = 't0'  # When the entry was created (t0, t1, t2)
+    is_money: bool = False  # True if this entry is a means of payment (cash, deposit)
+
 
     def matches(self, other: 'BalanceSheetEntry') -> bool:
         """Check if two entries match (used for removing entries)"""
@@ -368,10 +370,6 @@ class EconomicSystem:
         self.time_states: Dict[str, Dict[str, Agent]] = {}  # States at different time points
         self.current_time_state = "t0"  # Track current time state
         self.simulation_finalized = False  # Track if simulation is finalized
-        self.money_system={}
-        self.time_series_tracker={}
-        self.flux_and_reflux={}
-        self.means_of_payment={}
         # Initialize t0 state
         self.save_state('t0')
 
@@ -449,17 +447,13 @@ class EconomicSystem:
                              and asset.denomination == pair.denomination),
                             None
                         )
-                        self.money_system[pair.asset_holder]=self.money_system.get(pair.asset_holder,[])+[f'{time_point}','asset',pair.amount,'+']
-                        self.flux_and_reflux[time_point]=self.flux_and_reflux.get(time_point,[])+[(time_point,debtor_deposit.type,pair.amount,'flux')]
-                        self.money_system[pair.liability_holder]=self.money_system.get(pair.liability_holder,[])+[f'{time_point}','liability',pair.amount,'-']
-                        self.flux_and_reflux[time_point]=self.flux_and_reflux.get(time_point,[])+[(time_point,debtor_deposit.type,pair.amount,'reflux')]
 
                         if not debtor_deposit:
                             raise ValueError(f"No suitable deposit found for settlement")
 
                         # Get the bank that holds the deposit liability
                         bank = next(a for a in self.agents.values() if a.name == debtor_deposit.counterparty)
-                        self.money_system[bank]=self.money_system.get(bank,[])+[f'{time_point}','liability',pair.amount,f'change of liability holder to {pair.asset_holder}']
+
                         # Remove the original deposit from the debtor
                         pair.liability_holder.remove_asset(debtor_deposit)
 
@@ -750,18 +744,34 @@ class EconomicSystem:
         )
 
         return default_claim, default_liability
+
     def run_simulation(self) -> bool:
         """Run the full simulation from t0 through t2, handling settlements and defaults"""
         print("\nStarting simulation from t0...")
-        for agent in self.agents.values():
-            for asset in agent.assets:
-                if asset.issuance_time=='t0' and (asset.type == EntryType.DEPOSIT or asset.type == EntryType.PAYABLE):
-                    self.money_system[agent]=self.money_system.get(agent,[])+[('t0','asset',asset.amount)]
-                    changes=self.time_series_tracker.get(time_point,{})
-                    changes[asset.type]=changes.get(asset.type,0)+asset.amount
-            for liability in agent.liabilities:
-                if liability.issuance_time=='t0' and liability.type == EntryType.PAYABLE:
-                    self.money_system[agent]=self.money_system.get(agent,[])+[('t0','liability',liability.amount)]
+        money_supply_time_series = []  # Stores (time, {type: amount}) tuples
+        flux_reflux_log = []  # Stores (timestamp, type, action, amount)
+
+        def detect_flux_reflux(prev: Dict[str, float], current: Dict[str, float], timestamp: str):
+            all_keys = set(prev.keys()) | set(current.keys())
+            for key in all_keys:
+                old = prev.get(key, 0.0)
+                new = current.get(key, 0.0)
+                diff = new - old
+                if diff > 0:
+                    flux_reflux_log.append((timestamp, key, 'flux', diff))
+                elif diff < 0:
+                    flux_reflux_log.append((timestamp, key, 'reflux', -diff))
+
+        def snapshot_money_supply(current_time: str, agents: List[Agent]):
+            money_by_type = {}
+            for agent in agents:
+                for entry in agent.assets:
+                    if getattr(entry, 'is_money', False):
+                        money_by_type[entry.name] = money_by_type.get(entry.name, 0.0) + entry.amount
+            money_supply_time_series.append((current_time, money_by_type.copy()))
+
+
+
         for time_point in ['t1', 't2']:
             print(f"\nProcessing {time_point}...")
 
@@ -803,20 +813,21 @@ class EconomicSystem:
 
             # If we get here, try to settle all entries for this time point
             self.settle_entries(time_point)
-            for agent in self.agents.values():
-                for asset in agent.assets:
-                    if asset.type == EntryType.DEPOSIT  or asset.type == EntryType.PAYABLE:
-                        changes=self.time_series_tracker.get(time_point,{})
-                        changes[asset.type]=changes.get(asset.type,0)+asset.amount          
-            for time_point,assets in self.time_series_tracker.items():
-                for asset in assets.keys():
-                    self.means_of_payment[asset]=assets.get(asset,[])+[{"time": time_point, "total": assets.get(asset,0), "change": None}]
-                    if time_point!='t0':
-                        last='t'+str(time_point[-1]-1)
-                        change=self.time_series_tracker[last].get(asset)-assets.get(asset)
-                        self.means_of_payment[asset]=assets.get(asset,[])+[{"time": time_point, "total": assets.get(asset,0), "change": change}]
-                            
+            # Take snapshot and detect changes
+            snapshot_money_supply(time_point, self.agents.values())
+            if len(money_supply_time_series) > 1:
+                detect_flux_reflux(money_supply_time_series[-2][1], money_supply_time_series[-1][1], time_point)
+
+
         print("\nSimulation completed successfully!")
+        print("Money Supply Time Series:")
+        for entry in money_supply_time_series:
+            print(entry)
+
+        print("\nFlux/Reflux Events:")
+        for event in flux_reflux_log:
+            print(event)
+
         return True
 
     def display_settlement_history(self):
