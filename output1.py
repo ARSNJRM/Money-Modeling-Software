@@ -450,9 +450,6 @@ class EconomicSystem:
                             None
                         )
                         self.money_system[pair.asset_holder]=self.money_system.get(pair.asset_holder,[])+[f'{time_point}','asset',pair.amount,'+']
-                        self.flux_and_reflux[time_point]=self.flux_and_reflux.get(time_point,[])+[(time_point,debtor_deposit.type,pair.amount,'flux')]
-                        self.money_system[pair.liability_holder]=self.money_system.get(pair.liability_holder,[])+[f'{time_point}','liability',pair.amount,'-']
-                        self.flux_and_reflux[time_point]=self.flux_and_reflux.get(time_point,[])+[(time_point,debtor_deposit.type,pair.amount,'reflux')]
 
                         if not debtor_deposit:
                             raise ValueError(f"No suitable deposit found for settlement")
@@ -755,13 +752,12 @@ class EconomicSystem:
         print("\nStarting simulation from t0...")
         for agent in self.agents.values():
             for asset in agent.assets:
-                if asset.issuance_time=='t0' and (asset.type == EntryType.DEPOSIT or asset.type == EntryType.PAYABLE):
+                if asset.issuance_time=='t0' and asset.type == EntryType.DEPOSIT:
                     self.money_system[agent]=self.money_system.get(agent,[])+[('t0','asset',asset.amount)]
-                    changes=self.time_series_tracker.get(time_point,{})
+                    if self.time_series_tracker.get('t0',{})=={}:
+                        self.time_series_tracker['t0']={}
+                    changes=self.time_series_tracker['t0']
                     changes[asset.type]=changes.get(asset.type,0)+asset.amount
-            for liability in agent.liabilities:
-                if liability.issuance_time=='t0' and liability.type == EntryType.PAYABLE:
-                    self.money_system[agent]=self.money_system.get(agent,[])+[('t0','liability',liability.amount)]
         for time_point in ['t1', 't2']:
             print(f"\nProcessing {time_point}...")
 
@@ -805,18 +801,29 @@ class EconomicSystem:
             self.settle_entries(time_point)
             for agent in self.agents.values():
                 for asset in agent.assets:
-                    if asset.type == EntryType.DEPOSIT  or asset.type == EntryType.PAYABLE:
-                        changes=self.time_series_tracker.get(time_point,{})
+                    if asset.type == EntryType.DEPOSIT:
+                        if self.time_series_tracker.get(time_point,{})=={}:
+                            self.time_series_tracker[time_point]={}
+                        changes=self.time_series_tracker[time_point]
                         changes[asset.type]=changes.get(asset.type,0)+asset.amount          
             for time_point,assets in self.time_series_tracker.items():
                 for asset in assets.keys():
-                    self.means_of_payment[asset]=assets.get(asset,[])+[{"time": time_point, "total": assets.get(asset,0), "change": None}]
                     if time_point!='t0':
-                        last='t'+str(time_point[-1]-1)
+                        last='t'+str(int(time_point[-1])-1)
                         change=self.time_series_tracker[last].get(asset)-assets.get(asset)
-                        self.means_of_payment[asset]=assets.get(asset,[])+[{"time": time_point, "total": assets.get(asset,0), "change": change}]
+                        self.means_of_payment[asset]=self.means_of_payment[asset]+[{"time": time_point, "total": assets.get(asset,0), "change": change}]
+                        if change!=0.0:
+                            if change<0:
+                                self.flux_and_reflux[time_point]=self.flux_and_reflux.get(time_point,[])+[(time_point,'+'+str(change),'flux')]
+                            else:
+                                self.flux_and_reflux[time_point]=self.flux_and_reflux.get(time_point,[])+[(time_point,'-'+str(change),'reflux')]
+                    else:
+                        self.means_of_payment[asset]=[{"time": time_point, "total": assets.get(asset,0), "change": None}]
                             
         print("\nSimulation completed successfully!")
+        print(self.time_series_tracker)
+        print(self.flux_and_reflux)
+        print(self.means_of_payment)
         return True
 
     def display_settlement_history(self):
