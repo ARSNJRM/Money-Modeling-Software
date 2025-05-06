@@ -372,6 +372,15 @@ class EconomicSystem:
         self.time_series_tracker={}
         self.flux_and_reflux={}
         self.means_of_payment={}
+        #debt system
+        self.debt_map={}
+        self.debt_stock={}
+        self.debt_flows={}
+        self.maturity_profile={'t+1':{},'t+n':{}}
+        self.maturity={}
+        self.debt_position={}
+        self.debt_ratio=[{},{},{}]
+        self.default_tracker={}
         # Initialize t0 state
         self.save_state('t0')
 
@@ -684,6 +693,23 @@ class EconomicSystem:
 
             # Find new and removed liabilities
             new_liabilities = [l for l in to_agent.liabilities if not any(l.matches(from_l) for from_l in from_agent.liabilities)]
+            for liability in new_liabilities:
+                    if liability.maturity_type == MaturityType.FIXED_DATE:
+                        maturity_time='t'+str(int((liability.maturity_date.year-2000)/50))
+                        asset_holder = next(a for a in self.agents.values()
+                                        if a.name == liability.counterparty)
+
+                        asset_entry = next(a for a in asset_holder.assets
+                                        if a.matches(liability))
+                        liability_holder = next(a for a in self.agents.values()
+                                        if a.name == asset_entry.counterparty)
+                        
+                        if int(maturity_time[-1])-int(liability.issuance_time[-1])<=1:
+                            self.maturity_profile['t+1'][liability.type]=self.maturity_profile['t+1'][liability.type]+liability.denomination if self.maturity_profile['t+1'][liability.type] else liability.denomination
+                            self.maturity[liability_holder][to_time]['short-term']=self.maturity[liability_holder][to_time].get('short-term',0)+1
+                        else:
+                            self.maturity_profile['t+n'][liability.type]=self.maturity_profile['t+n'][liability.type]+liability.denomination if self.maturity_profile['t+n'][liability.type] else liability.denomination
+                            self.maturity[liability_holder][to_time]['long-term']=self.maturity[liability_holder][to_time].get('long-term',0)+1
             removed_liabilities = [l for l in from_agent.liabilities if not any(l.matches(to_l) for to_l in to_agent.liabilities)]
 
             changes[name] = {
@@ -751,6 +777,45 @@ class EconomicSystem:
         """Run the full simulation from t0 through t2, handling settlements and defaults"""
         print("\nStarting simulation from t0...")
         for agent in self.agents.values():
+            self.maturity[agent.name]['t0']={'short-term':0,'long-term':0,'most':None}
+            count,default_key,default_value={},None,0
+            for liability in agent.liabilities:
+                if liability.issuance_time=='t0' and liability.type in (EntryType.LOAN, EntryType.BOND, EntryType.DELIVERY_CLAIM,EntryType.PAYABLE):
+                    self.debt_position[agent.name]['t0']['gross_debt_owed']=self.debt_position[agent.name]['t0'].get('gross_debt_owed',0)+liability.denomination
+                    asset_holder = next(a for a in self.agents.values()
+                                        if a.name == liability.counterparty)
+                    self.debt_position[asset_holder.name]['t0']['gross_claims']=self.debt_position[asset_holder.name]['t0'].get('gross_claims',0)+liability.denomination
+                    self.debt_map[agent.name]['t0'][liability.type]=liability.denomination
+                    if liability.maturity_type == MaturityType.FIXED_DATE:
+                        maturity_time='t'+str(int((liability.maturity_date.year-2000)/50))
+                        count[maturity_time]=count.get(maturity_time,0)+1
+                        if int(maturity_time[-1])-int(liability.issuance_time[-1])<=1:
+                            self.maturity_profile['t+1'][liability.type]=self.maturity_profile['t+1'][liability.type]+liability.denomination if self.maturity_profile['t+1'][liability.type] else liability.denomination
+                            self.maturity[agent.name]['t0']['short-term']+=1
+                        else:
+                            self.maturity_profile['t+n'][liability.type]=self.maturity_profile['t+n'][liability.type]+liability.denomination if self.maturity_profile['t+n'][liability.type] else liability.denomination
+                            self.maturity[agent.name]['t0']['long-term']+=1
+                    if self.debt_stock['t0'][liability.type][agent.type]:
+                        self.debt_stock['t0'][liability.type][agent.type]=self.debt_stock['t0'][liability.type][agent.type]+liability.denomination
+                    else:
+                        self.debt_stock['t0'][liability.type][agent.type]=0
+                        self.debt_stock['t0'][liability.type][agent.type]=self.debt_stock['t0'][liability.type][agent.type]+liability.denomination
+            for key,value in count.items():
+                if value>default_value:
+                    default_value=value
+                    default_key=key
+            self.maturity[agent.name]['t0']['most']=default_key
+        for agent in self.agents.values():
+            self.debt_position[agent.name]['t0']['net_debt']=self.debt_position[agent.name]['t0'].get('gross_debt_owed',0)-self.debt_position[agent.name]['t0'].get('gross_claims',0)
+            for i in range(3):
+                self.debt_ratio[i][agent.name]['total_debt']=self.debt_position[agent.name]['t0'].get('gross_debt_owed',0)
+            self.debt_ratio[2][agent.name]['net_worth']=agent.get_net_worth()
+            self.debt_ratio[2][agent.name]['debt_to_equity']=self.debt_ratio[i][agent.name]['total_debt']/self.debt_ratio[2][agent.name]['net_worth']
+            self.debt_ratio[0]['total_assets']=agent.get_total_assets()
+            self.debt_ratio[0]['debt_to_asset']=self.debt_ratio[i][agent.name]['total_debt']/self.debt_ratio[0]['total_assets']
+            # System-wide Debt-to-GDP Proxy(work out what is nominal output)
+            # single time point or changing in time?
+        for agent in self.agents.values():
             for asset in agent.assets:
                 if asset.issuance_time=='t0' and asset.type == EntryType.DEPOSIT:
                     self.money_system[agent]=self.money_system.get(agent,[])+[('t0','asset',asset.amount)]
@@ -776,6 +841,8 @@ class EconomicSystem:
 
                 if not can_settle:
                     print(f"\nDEFAULT DETECTED: {agent.name} cannot settle {liability.type.value}")
+                    temp=f"\nDEFAULT DETECTED: {agent.name} cannot settle {liability.type.value}/n Reason: {reason}"
+                    value=liability.denomination
                     print(f"Reason: {reason}")
 
                     # Find the corresponding asset holder
@@ -795,10 +862,96 @@ class EconomicSystem:
 
                     # Save state after default
                     self.save_state(time_point)
-                    return False  # Stop simulation
+                    class Node:
+                        def __init__(self, element = None,length=None, prev = [], next = []):
+                            self._element = element
+                            self._length=length
+                            self._prev = prev
+                            self._next = next
+                    if self.default_tracker[liability.maturity_date.year][asset_holder]==None:
+                        self.default_tracker[liability.maturity_date.year][asset_holder]=[]
+                    a=Node(value,0)
+                    self.default_tracker[liability.maturity_date.year][asset_holder].append((temp,a))
+                    if self.default_tracker[liability.maturity_date.year-50][agent]:
+                        count=0
+                        test=True
+                        for i in self.default_tracker[liability.maturity_date.year-50][agent]:
+                            if i[-1]._element>a._element:
+                                i[-1]._length+=1
+                                i[-1]._next.append(a)
+                                a._prev.append(i[-1])
+                                test=False
+                                break
+                        if test:
+                            for i in self.default_tracker[liability.maturity_date.year-50][agent]:
+                                i[-1]._length+=1
+                                i[-1]._next.append(a)
+                                a._prev.append(i[-1])
+                    def recur(q,count):
+                        if len(a._prev)==0:
+                            return
+                        if count!=0:
+                            for n in q._prev:
+                                    n._length+=1
+                                    recur(n,count+1)
+                        else:
+                            for n in q._prev:
+                                if len(n._prev)!=0:
+                                    for g in n._prev:
+                                        g._length+=1
+                                        recur(g,count+1)
+                    recur(a,0)
+                    
+                            
+                                    
+                    
+                                
+                            
+                                
+                                
+                                
+                    
+                    #return False  # Stop simulation
 
             # If we get here, try to settle all entries for this time point
             self.settle_entries(time_point)
+            last_time='t'+str(int(time_point[-1])-1)
+            self.compute_changes(last_time,time_point)
+            self.debt_flows[f'{last_time} - {time_point}']={'issued': 0, 'repaid': 0, 'net_change': 0}
+            for agent in self.agents.values():
+                for liability in agent.liabilities:
+                    if liability.type in (EntryType.LOAN, EntryType.BOND, EntryType.DELIVERY_CLAIM,EntryType.PAYABLE):
+                        self.debt_map[agent.name][time_point][liability.type]=liability.denomination
+                        self.debt_position[agent.name][time_point]['gross_debt_owed']=self.debt_position[agent.name][time_point].get('gross_debt_owed',0)+liability.denomination
+                        asset_holder = next(a for a in self.agents.values()
+                                        if a.name == liability.counterparty)
+                        self.debt_position[asset_holder.name][time_point]['gross_claims']=self.debt_position[asset_holder.name][time_point].get('gross_claims',0)+liability.denomination
+                        if self.debt_stock[time_point][liability.type][agent.type]:
+                            self.debt_stock[time_point][liability.type][agent.type]=self.debt_stock[time_point][liability.type][agent.type]+liability.denomination
+                        else:
+                            self.debt_stock[time_point][liability.type][agent.type]=0
+                            self.debt_stock[time_point][liability.type][agent.type]=self.debt_stock[time_point][liability.type][agent.type]+liability.denomination
+            for agent in self.agents.values():
+                self.debt_position[asset_holder.name][time_point]['net_debt']=self.debt_position[asset_holder.name][time_point].get('gross_debt_owed',0)-self.debt_position[asset_holder.name][time_point].get('gross_claims',0)
+            for liability_type in self.debt_stock[time_point].keys():
+                if self.debt_stock[last_time].get(liability_type,None)==None:
+                    for agent_value in self.debt_stock[time_point][liability_type].values():
+                        self.debt_flows[f'{last_time} - {time_point}']['issued']+=agent_value
+                else:
+                    for agent_type,agent_value in self.debt_stock[time_point][liability_type].items():
+                        if self.debt_stock[last_time][liability_type].get(agent_type,None)==None:
+                            self.debt_flows[f'{last_time} - {time_point}']['issued']+=agent_value
+            
+            for liability_type in self.debt_stock[last_time].keys():
+                if self.debt_stock[time_point].get(liability_type,None)==None:
+                    for agent_value in self.debt_stock[last_time][liability_type].values():
+                        self.debt_flows[f'{last_time} - {time_point}']['repaid']+=agent_value
+                else:
+                    for agent_type,agent_value in self.debt_stock[last_time][liability_type].items():
+                        if self.debt_stock[time_point][liability_type].get(agent_type,None)==None:
+                            self.debt_flows[f'{last_time} - {time_point}']['repaid']+=agent_value
+            self.debt_flows[f'{last_time} - {time_point}']['net_change']=self.debt_flows[f'{last_time} - {time_point}']['issued']-self.debt_flows[f'{last_time} - {time_point}']['repaid']
+            
             for agent in self.agents.values():
                 for asset in agent.assets:
                     if asset.type == EntryType.DEPOSIT:
@@ -819,7 +972,17 @@ class EconomicSystem:
                                 self.flux_and_reflux[time_point]=self.flux_and_reflux.get(time_point,[])+[(time_point,'-'+str(change),'reflux')]
                     else:
                         self.means_of_payment[asset]=[{"time": time_point, "total": assets.get(asset,0), "change": None}]
-                            
+            max_length,max_default=0,None
+            for date,agents in self.default_tracker.items():
+                for agent,defaults in agents.items():
+                    for default in defaults:
+                        if default[-1]._length>max_length:
+                            max_length=default[-1]._length
+                            max_default=default
+            self.default_tracker['max']=max_default
+                    
+                    
+                               
         print("\nSimulation completed successfully!")
         print(self.time_series_tracker)
         print(self.flux_and_reflux)
