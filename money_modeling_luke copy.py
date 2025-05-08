@@ -386,7 +386,13 @@ class EconomicSystem:
         self.final_time_state = 999 
         self.simulation_finalized = False  # Track if simulation is finalized
         self.save_state(0) # Initialize state time 0
+        self.scheduled_actions: Dict[int, List[Tuple[str, Dict]]] = {} #[time, [(action, args for function)]]
 
+    def schedule_action(self, time_point: int, action_name: str, params: Dict):
+        if time_point not in self.scheduled_actions:
+            self.scheduled_actions[time_point] = []
+        self.scheduled_actions[time_point].append((action_name, params))
+        
     def validate_time_point(self, time_point: int, allow_t0: bool = True) -> None: 
         """Validate a time point string"""
         valid_points = (range(0,self.final_time_state) if allow_t0 
@@ -773,6 +779,263 @@ class EconomicSystem:
         )
 
         return default_claim, default_liability
+    
+    def run_user_scheduled_actions(self):
+        '''run actions explicitly scheduled by user'''
+        actions = self.scheduled_actions.get(self.current_time_state, [])
+        if not actions:
+            return
+         # skips if the time point has no scheduled actions
+        
+        action_map = {
+            'Create Asset–Liability Pair': self.create_asset_liability_pair,
+            'Issue Loan': self.disburse_loans,
+            'Request Loan': self.submit_loan_requests,
+            'Quote Loan Terms': self.return_loan_quotes,
+            'Commit to Loan': self.commit_to_terms,
+            'Repay Loan': self.execute_repayments,
+            'Default on Loan': self.resolve_defaults,
+            'Issue Bond': self.issue_securities,
+            'Request Bond Quote': self.submit_trade_quotes,
+            'Dealer Bond Quote': self.return_trade_quotes,
+            'Commit to Bond Purchase': self.commit_to_terms,
+            'Execute Bond Trade': self.dealer_execute_trades,
+            'Repay Bond': self.execute_repayments,
+            'Default on Bond': self.resolve_defaults,
+            'Issue Share (One-Time)': self.issue_securities,
+            'Request Share Quote': self.submit_trade_quotes,
+            'Dealer Quote': self.return_trade_quotes,
+            'Commit to Purchase': self.commit_to_terms,
+            'Execute Trade': self.dealer_execute_trades,
+            'Transfer Deposit': self.reallocate_deposits,
+            'Net Interbank IOUs': self.update_interbank_ious,
+            'Rollover IOU Request': self.evaluate_iou_rollovers,
+            'Respond to Rollover': self.evaluate_iou_rollovers,
+            'Request Overnight Loan': self.request_cb_loans,
+            'Issue Overnight Loan': self.disburse_cb_loans,
+            'Settle with Reserves': self.settle_final_reserve_obligations,
+            'Regulatory Check (RRR, CAR)': self.check_regulatory_compliance,
+            'Request Regulatory Support': self.request_regulatory_support,
+            'Issue Regulatory Support': self.provide_regulatory_support,
+            'Compute Metrics': self.compute_system_metrics,
+            'Update Internal Info': self.update_agent_metrics,
+            'Dealer Inventory Valuation': self.update_dealer_quotes
+        }
+
+        for action_name, params in actions:
+            method = action_map.get(action_name)
+            if not method:
+                # skip unimplemented or unknown actions
+                continue
+            try:
+                if params:
+                    method(**params)
+                else:
+                    method()
+            except TypeError:
+                # fallback if method signature doesn't accept params
+                method()
+        # Clear executed actions for this time point
+        self.scheduled_actions.pop(self.current_time_state, None)
+    
+    def update_agent_metrics(self):
+        '''agents recalculate internal balance sheet metrics'''
+        pass
+
+    def nonbank_actions(self):
+        '''general transactions for non-banks'''
+        pass
+
+    def issue_securities(self):
+        '''companies and banks can issue new bonds and first time shares'''
+        pass
+
+    def update_dealer_quotes(self): ## think these three functions can be combined
+        '''dealers compute their prices'''
+        pass
+
+    def submit_trade_quotes(self): ##
+        '''agents send quote request to dealers'''
+        pass
+
+    def return_trade_quotes(self): ## 
+        '''dealers return their quotes to agents'''
+        pass 
+
+    def submit_loan_requests(self): ### these four as well
+        '''agents request banks for loans'''
+        pass
+
+    def return_loan_quotes(self): ###
+        '''banks evaluate and quote terms'''
+        pass
+
+    def commit_to_terms(self): ###
+        '''borrowers accept loan offers'''
+        pass
+
+    def disburse_loans(self): ###
+        '''loan is created'''
+        pass
+
+    def finalize_trade_commitments(self):
+        '''agents confirm the trades they plan to execute'''
+        pass
+
+    def dealer_execute_trades(self):
+        '''dealers trade and update portfolios'''
+        pass
+
+    def reallocate_deposits(self):
+        '''deposits are transferred and interbank IOUs are updated'''
+        pass
+
+    def verify_settlement_needs(self):
+        '''system checks agents due obligations and means of payment'''
+        maturing = [
+            (agent, l) 
+            for agent in self.agents.values()
+            for l in agent.liabilities
+            if l.maturity_type == MaturityType.FIXED_DATE 
+               and l.maturity_date == self.current_time_state
+        ]
+        for agent, liability in maturing:
+            can, reason = self.can_settle_entry(agent, liability)
+            if not can:
+                agent.status = "defaulting"
+
+    def execute_repayments(self):
+        '''scheduled payments are executed, updating balance sheets and flagging defaulting agents'''
+        maturing = [
+            (agent, l) 
+            for agent in self.agents.values()
+            for l in agent.liabilities
+            if l.maturity_type == MaturityType.FIXED_DATE 
+               and l.maturity_date == self.current_time_state
+        ]
+        for agent, liability in maturing:
+            pass
+
+    def resolve_nonbank_defaults(self):
+        '''Process all non-bank agents marked as 'defaulting': recover assets and allocate to creditors.'''
+        
+        # find all non-bank agents in defaulting state
+        defaulting_agents = [agent for agent in self.agents.values()
+                              if agent.status == 'defaulting' and not agent.is_bank]
+
+        for defaulting_agent in defaulting_agents:
+            # aggregate transferable assets
+            total_recovery = 0.0
+            recovery_assets: List[BalanceSheetEntry] = []
+            for asset in list(defaulting_agent.assets):
+                if asset.settlement_details.type in (
+                    SettlementType.MEANS_OF_PAYMENT,
+                    SettlementType.CRYPTO,
+                ):
+                    total_recovery += asset.current_book_value
+                    recovery_assets.append(asset)
+
+            # identify creditors
+            creditors: List[Tuple[Agent, BalanceSheetEntry]] = []
+            total_claims = 0.0
+            for other in self.agents.values():
+                for claim in list(other.assets):
+                    if claim.counterparty == defaulting_agent.name and claim.type != EntryType.DEFAULT:
+                        creditors.append((other, claim))
+                        total_claims += claim.current_book_value
+
+            # if no resources or creditors, clear liabilities and continue
+            if total_claims <= 0 or total_recovery <= 0 or not creditors:
+                defaulting_agent.liabilities.clear()
+                continue
+
+            # remove assets from debtor
+            for asset in recovery_assets:
+                defaulting_agent.remove_asset(asset)
+
+            # distribute recovery pro-rata
+            for creditor, claim in creditors:
+                share = claim.current_book_value / total_claims * total_recovery
+                creditor.remove_asset(claim)
+                default_entry = BalanceSheetEntry(
+                    type=EntryType.DEFAULT,
+                    is_asset=True,
+                    counterparty=defaulting_agent.name,
+                    initial_book_value=share,
+                    denomination=claim.denomination,
+                    maturity_type=MaturityType.ON_DEMAND,
+                    maturity_date=None,
+                    settlement_details=claim.settlement_details,
+                    issuance_time=self.current_time_state,
+                    name=f"Recovery from {defaulting_agent.name} default",
+                )
+                creditor.add_asset(default_entry)
+
+            # clear debtor liabilities
+            defaulting_agent.liabilities.clear()
+
+    def update_interbank_ious(self):
+        '''all intraday IOUs are netted'''
+        pass
+
+    def evaluate_iou_rollovers(self): 
+        '''banks in defecit may request IOU rollovers, to which surplus banks respond'''
+        pass
+
+    def request_cb_loans(self): 
+        '''remaining deficit banks request overnight funding from central bank'''
+        pass
+
+    def disburse_cb_loans(self): 
+        '''central bank disburses to eligible deficit banks'''
+        pass
+
+    def settle_final_reserve_obligations(self):
+        '''remaining obligations are settled, unresolved payment now leads to default'''
+        pass
+
+    def check_regulatory_compliance(self):
+        '''system evaluates each banks RRR and CAR'''
+        pass
+
+    def request_regulatory_support(self): 
+        '''banks failing RRR and CAR checks request assistance from central bank'''
+        pass
+
+    def provide_regulatory_support(self): 
+        '''central bank provides liquid/capital to restore minimum compliance'''
+        pass
+
+    def compute_system_metrics(self):
+        '''final state metrics are calculated'''
+        pass
+
+    def run_actions(self):
+        self.update_agent_metrics()
+        self.nonbank_actions()
+        self.issue_securities()
+        self.update_dealer_quotes()
+        self.submit_trade_quotes()
+        self.return_trade_quotes()
+        self.submit_loan_requests()
+        self.return_loan_quotes()
+        self.commit_to_terms()
+        self.disburse_loans()
+        self.finalize_trade_commitments()
+        self.dealer_execute_trades()
+        self.reallocate_deposits()
+        self.verify_settlement_needs()  
+        self.execute_repayments()       
+        self.resolve_nonbank_defaults() 
+        self.update_interbank_ious()
+        self.evaluate_iou_rollovers()
+        self.request_cb_loans()
+        self.disburse_cb_loans()
+        self.settle_final_reserve_obligations()
+        self.check_regulatory_compliance()
+        self.request_regulatory_support()
+        self.provide_regulatory_support()
+        self.compute_system_metrics()
 
     def run_simulation(self, time_points) -> bool: 
         """Run the full simulation from t0 to ti, handling settlements and defaults"""
@@ -781,12 +1044,16 @@ class EconomicSystem:
         for time in range(time_points):
             print(f"\nProcessing time {time}...")
 
+            # should do nothing currently
+            self.run_actions()
+
             # Get all entries that mature at this time point
             maturing_entries = []
             for agent in self.agents.values():
                 for liability in agent.liabilities:
                     if liability.maturity_type == MaturityType.FIXED_DATE:
-                        maturing_entries.append((agent, liability))
+                        if liability.maturity_date == time:
+                            maturing_entries.append((agent, liability))
 
             # Try to settle each entry
             for agent, liability in maturing_entries:
