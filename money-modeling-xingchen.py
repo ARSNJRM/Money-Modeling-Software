@@ -207,6 +207,18 @@ class Agent:
         else:
             self.settlement_history['as_liability_holder'].append(settlement_record)
 
+    def update_inventory(self, bond_delta, cash_delta):
+        """Adjust bond and cash inventory."""
+        self.inventory_bond += bond_delta
+        self.inventory_cash += cash_delta
+        
+        # Update trading statistics
+        if bond_delta != 0:  # Only count actual trades
+            self.trade_count += 1
+            self.total_volume += abs(bond_delta)
+            self.trade_volumes.append(abs(bond_delta))
+            self.trade_prices.append(-cash_delta / bond_delta)  # Price per bond
+
 class AssetLiabilityPair:
     """Represents a pair of corresponding asset and liability entries"""
     def __init__(self, time: datetime, type: str, amount: float,                 denomination: str, maturity_type: MaturityType,
@@ -461,12 +473,13 @@ class AssetLiabilityPair:
         self.asset_holder = new_holder
 
 class EconomicSystem:
-    def __init__(self):
+    def __init__(self, num_cycles=1):
         self.agents: Dict[str, Agent] = {}  # Current state
         self.asset_liability_pairs: List[AssetLiabilityPair] = []
         self.time_states: Dict[str, Dict[str, Agent]] = {}  # States at different time points
         self.current_time_state = "t0"  # Track current time state
         self.simulation_finalized = False  # Track if simulation is finalized
+        self.num_cycles = num_cycles       # Number of simulation cycles
         # Initialize t0 state
         self.save_state('t0')
 
@@ -586,9 +599,259 @@ class EconomicSystem:
         return {name: agent for name, agent in self.agents.items()}
 
     def run_simulation(self) -> bool:
-        print("\nStarting simulation...")
-        self.save_state('t0')
-        print("t0 state saved")
+        for cycle in range(self.num_cycles):
+            # Initialize orders dictionary at the beginning of each cycle
+            orders = {}
+            
+            # Create initial bond inventory for dealers if this is the first cycle and t0
+            if cycle == 0 and self.current_time_state == 't0':
+                print("\n=== Creating Initial Bond Inventory for Dealers ===")
+                for agent in self.agents.values():
+                    if isinstance(agent, SecurityDealer) and agent.inventory_bond == 0:
+                        # Find a suitable liability issuer (preferably a Treasury or Bank)
+                        issuers = [a for a in self.agents.values() if a.type in [AgentType.TREASURY, AgentType.BANK]]
+                        if not issuers:  # If no Treasury/Bank, use any other agent
+                            issuers = [a for a in self.agents.values() if a != agent and a.type != AgentType.OTHER]
+                        
+                        if issuers:
+                            issuer = issuers[0]  # Take the first available issuer
+                            initial_bond_qty = 20  # Give dealer 20 bonds to start with
+                            
+                            # Create a zero-coupon bond with dealer as asset holder
+                            now = datetime.now()
+                            maturity_date = datetime(2100, 1, 1)  # t2
+                            pair = AssetLiabilityPair(
+                                time=now,
+                                type=EntryType.BOND_ZERO_COUPON.value,
+                                amount=initial_bond_qty,
+                                denomination="USD",
+                                maturity_type=MaturityType.FIXED_DATE,
+                                maturity_date=maturity_date,
+                                settlement_type=SettlementType.MEANS_OF_PAYMENT,
+                                settlement_denomination="USD",
+                                asset_holder=agent,  # Dealer holds the bond
+                                liability_holder=issuer  # Issuer (Treasury/Bank) issued it
+                            )
+                            self.create_asset_liability_pair(pair)
+                            
+                            # Calculate the cost of bonds using mid-price
+                            bond_price = (agent.P_a + agent.P_b) / 2  # Using mid-price for initial inventory
+                            total_cost = initial_bond_qty * bond_price
+                            
+                            # Use update_inventory method to properly track trading statistics
+                            # Note: This is a "buy" transaction for the dealer (positive bond_delta, negative cash_delta)
+                            # First, reset inventory to 0 to avoid double counting
+                            agent.inventory_bond = 0  
+                            agent.update_inventory(initial_bond_qty, -total_cost)
+                            
+                            print(f"Created initial inventory: {agent.name} now holds {initial_bond_qty} bonds from {issuer.name}")
+                            print(f"Paid {total_cost:.2f} for initial inventory, remaining cash: {agent.inventory_cash:.2f}")
+                            print(f"Transaction recorded in trading statistics as a buy of {initial_bond_qty} bonds @ {bond_price:.2f}")
+            
+            # Print initial state of all dealers
+            print("\n=== Initial Dealer State ===")
+            for agent in self.agents.values():
+                if isinstance(agent, SecurityDealer):
+                    print(f"{agent.name}: Bond Inventory = {agent.inventory_bond}, Cash = {agent.inventory_cash:.2f}")
+                    print(f"  Inventory Limit = {agent.inventory_limit}, Base Price = {(agent.P_a + agent.P_b)/2:.2f}")
+                    
+            # === Stage tn2: Dealer quoting phase ===
+            for agent in self.agents.values():
+                if isinstance(agent, SecurityDealer):
+                    bid, ask = agent.get_prices()
+                    print(f"  {agent.name} bid = {bid:.2f}, ask = {ask:.2f}")
+            # === Stage tn3: Dealer repricing phase ===
+            for agent in self.agents.values():
+                if isinstance(agent, SecurityDealer):
+                    # 1. Read fundamental quotes from VBT stub
+                    P_b = agent.P_b               # VBT bid price from tn2
+                    P_a = agent.P_a               # VBT ask price from tn2
+
+                    # 2. Read current inventory and parameters
+                    X = agent.inventory_bond      # Current bond inventory
+                    X_star = agent.inventory_limit  # Inventory limit (X*)
+                    S = agent.S                   # Quoted size capacity for this round
+
+                    # 3. Compute spread width
+                    spread_width = (S / (2 * X_star)) * (P_a - P_b)
+
+                    # 4. Compute price slope (delta)
+                    delta = (P_a - P_b) / (2 * X_star + S)
+
+                    # 5. Compute mid‐price based on current inventory
+                    mid_price = (P_a + P_b) / 2 + delta * X
+
+                    # 6. Derive bid and ask quotes
+                    bid = mid_price - spread_width / 2
+                    ask = mid_price + spread_width / 2
+
+                    # 7. Store this round's quotes for use in tn5 and tn10
+                    agent.current_bid = bid
+                    agent.current_ask = ask
+
+                    # 8. Log the repriced quotes
+                    print(f"  {agent.name} repriced bid = {bid:.2f}, ask = {ask:.2f}")
+            # === Stage tn4: Collect quote requests ===
+            quote_requests = []
+            for agent in self.agents.values():
+                if not isinstance(agent, SecurityDealer):  # Only non-Dealer agents
+                    for dealer in self.agents.values():
+                        if isinstance(dealer, SecurityDealer):
+                            # If agent has request_quote method, use it
+                            if hasattr(agent, "request_quote"):
+                                req = agent.request_quote(dealer.name)
+                            else:
+                                # Simulate quote request: buy if net worth > 0, else sell
+                                side = 'buy' if agent.get_net_worth() > 0 else 'sell'
+                                quantity = min(abs(agent.get_net_worth()) // 2, 10)
+                                req = {
+                                    'trader': agent.name,
+                                    'dealer': dealer.name,
+                                    'side': side,
+                                    'quantity': quantity
+                                }
+                            quote_requests.append(req)
+                            print(f"  {agent.name} requests {req['side']} {req['quantity']} from {dealer.name}")
+            # === Stage tn5: Store dealer quotes ===
+            dealer_quotes = {}
+            for agent in self.agents.values():
+                if isinstance(agent, SecurityDealer):
+                    bid, ask = agent.get_prices()
+                    dealer_quotes[agent.name] = (bid, ask)
+                    print(f"  Stored for {agent.name}: bid={bid:.2f}, ask={ask:.2f}")
+            # === Stage tn10: Simulating market order submissions ===
+            # --- tn10 ---
+            # Interactive order entry (only execute once per simulation cycle)
+            print("\n--- Interactive Order Entry (tn10) ---")
+            agent_list = list(self.agents.values())
+            for idx, agent in enumerate(agent_list, 1):
+                print(f"{idx}. {agent.name} ({agent.type.value})")
+            # Select agent
+            while True:
+                try:
+                    agent_idx = int(input(f"Select an agent as order initiator (default 1): ") or 1) - 1
+                    if 0 <= agent_idx < len(agent_list):
+                        order_agent = agent_list[agent_idx]
+                        break
+                    else:
+                        print("Invalid selection. Please enter a valid number.")
+                except ValueError:
+                    print("Invalid input. Please enter a number.")
+            # Select side
+            while True:
+                side = input("Order side? (buy/sell, default buy): ").strip().lower() or 'buy'
+                if side in ['buy', 'sell']:
+                    break
+                print("Invalid side. Please enter 'buy' or 'sell'.")
+            # Input quantity
+            while True:
+                try:
+                    quantity = int(input("Order quantity (default 5): ") or 5)
+                    if quantity > 0:
+                        break
+                    else:
+                        print("Quantity must be positive.")
+                except ValueError:
+                    print("Invalid input. Please enter a positive integer.")
+            # Input price
+            while True:
+                try:
+                    price = float(input("Order price (default 101.0): ") or 101.0)
+                    if price > 0:
+                        break
+                    else:
+                        print("Price must be positive.")
+                except ValueError:
+                    print("Invalid input. Please enter a positive number.")
+                    
+            # Find security dealers in the system
+            dealer_list = [agent for agent in self.agents.values() if isinstance(agent, SecurityDealer)]
+            
+            if not dealer_list:
+                print("Error: No SecurityDealer found in the system. Order not executed.")
+            else:
+                # If there's only one dealer, use it directly
+                if len(dealer_list) == 1:
+                    dealer = dealer_list[0]
+                    print(f"Using only available dealer: {dealer.name}")
+                else:
+                    # If multiple dealers, let user select
+                    print("\nSelect a dealer to execute the order:")
+                    for idx, d in enumerate(dealer_list, 1):
+                        print(f"{idx}. {d.name}")
+                    
+                    # Get dealer selection
+                    try:
+                        dealer_idx = int(input(f"Select dealer (default 1): ") or 1) - 1
+                        if 0 <= dealer_idx < len(dealer_list):
+                            dealer = dealer_list[dealer_idx]
+                        else:
+                            print("Invalid selection. Using first dealer.")
+                            dealer = dealer_list[0]
+                    except ValueError:
+                        print("Invalid input. Using first dealer.")
+                        dealer = dealer_list[0]
+                
+                # Execute order directly, no need to store in orders dictionary
+                # since we're directly calling handle_order here
+                print(f"\nExecuting order: {side} {quantity} @ {price} from {order_agent.name} to {dealer.name}")
+                
+                # Pass system reference for creating asset-liability pairs
+                dealer.handle_order(
+                    side=side, 
+                    quantity=quantity, 
+                    price=price, 
+                    system=self,  # Pass the economic system instance
+                    counterparty=order_agent  # Pass the agent initiating the order
+                )
+                
+                # Clear orders dictionary for this dealer to avoid duplicate processing in tn11
+                orders = {}
+            
+            # --- tn11 ---
+            # Skip, we already executed orders in tn10
+            
+            # --- tn12 ---
+            # Only check inventory limits, no need to handle orders again
+            for agent in self.agents.values():
+                if isinstance(agent, SecurityDealer):
+                    inv = agent.inventory_bond
+                    limit = agent.inventory_limit
+                    if abs(inv) > limit:  # Check both positive and negative excess
+                        excess = inv - limit if inv > limit else inv + limit
+                        side = 'sell' if inv > limit else 'buy'
+                        print(f"\nLayoff check: {agent.name} inventory {inv} exceeds limit {limit}")
+                        print(f"Inventory would need adjustment via {side} of {abs(excess)}")
+                        # We don't actually process layoff here to avoid duplication
+            # === Stage tn24: Dealer diagnostics ===
+            for agent in self.agents.values():
+                if isinstance(agent, SecurityDealer):
+                    stats = agent.get_trading_statistics()
+                    print(f"\n{agent.name} Trading Statistics:")
+                    print(f"1. Inventory & Cash:")
+                    print(f"   - Final Bond Inventory: {stats['final_inventory']}")
+                    print(f"   - Final Cash Position: {agent.inventory_cash:.2f}")
+                    print(f"   - P&L: {stats['pnl']:.2f}")
+                    
+                    print(f"\n2. Trading Volume:")
+                    print(f"   - Total Volume: {stats['total_volume']}")
+                    print(f"   - Number of Trades: {stats['trade_count']}")
+                    print(f"   - Average Trade Volume: {stats['avg_trade_volume']:.2f}")
+                    print(f"   - Layoff Volume: {stats['layoff_volume']}")
+                    
+                    print(f"\n3. Spread Statistics:")
+                    print(f"   - Average Spread: {stats['avg_spread']:.4f}")
+                    print(f"   - Minimum Spread: {stats['min_spread']:.4f}")
+                    print(f"   - Maximum Spread: {stats['max_spread']:.4f}")
+                    
+                    print(f"\n4. Price Statistics:")
+                    print(f"   - Average Trade Price: {stats['avg_trade_price']:.2f}")
+                    print(f"   - Current Bid: {agent.P_b:.2f}")
+                    print(f"   - Current Ask: {agent.P_a:.2f}")
+            # === Stage tn15: VBT quote update ===
+            for agent in self.agents.values():
+                if isinstance(agent, SecurityDealer):
+                    agent.update_vbt_quotes()
         return True
 
     def settle_entries(self, time_point: str):
@@ -1193,55 +1456,6 @@ class EconomicSystem:
 
         return default_claim, default_liability
 
-    def run_simulation(self) -> bool:
-        """Run the full simulation from t0 through t2, handling settlements and defaults"""
-        print("\nStarting simulation from t0...")
-
-        for time_point in ['t1', 't2']:
-            print(f"\nProcessing {time_point}...")
-
-            # Get all entries that mature at this time point
-            maturing_entries = []
-            for agent in self.agents.values():
-                for liability in agent.liabilities:
-                    if (liability.maturity_type == MaturityType.FIXED_DATE and
-                        ((time_point == 't1' and liability.maturity_date.year == 2050) or
-                         (time_point == 't2' and liability.maturity_date.year == 2100))):
-                        maturing_entries.append((agent, liability))
-
-            # Try to settle each entry
-            for agent, liability in maturing_entries:
-                can_settle, reason = self.can_settle_entry(agent, liability)
-
-                if not can_settle:
-                    print(f"\nDEFAULT DETECTED: {agent.name} cannot settle {liability.type.value}")
-                    print(f"Reason: {reason}")
-
-                    # Find the corresponding asset holder
-                    asset_holder = next(a for a in self.agents.values()
-                                      if a.name == liability.counterparty)
-
-                    # Remove the original asset-liability pair
-                    asset_entry = next(a for a in asset_holder.assets
-                                     if a.matches(liability))
-                    asset_holder.remove_asset(asset_entry)
-                    agent.remove_liability(liability)
-
-                    # Create and add default entries
-                    default_claim, default_liability = self.create_default_entries(liability)
-                    asset_holder.add_asset(default_claim)
-                    agent.add_liability(default_liability)
-
-                    # Save state after default
-                    self.save_state(time_point)
-                    return False  # Stop simulation
-
-            # If we get here, try to settle all entries for this time point
-            self.settle_entries(time_point)
-
-        print("\nSimulation completed successfully!")
-        return True
-
     def display_settlement_history(self):
         """Display settlement history for all agents"""
         if not self.agents:
@@ -1561,6 +1775,32 @@ def create_agent_interactive(system: EconomicSystem):
         print(f"Error: Agent '{name}' already exists!")
         return
 
+    # Check if this should be a ValueBasedTrader (VBT)
+    if "vbt" in name.lower() or name.lower().startswith("value"):
+        # Create a ValueBasedTrader instead of a regular Agent
+        print("\nDetected ValueBasedTrader naming pattern.")
+        print("Creating a ValueBasedTrader with get_prices() capability.")
+        
+        # Get base price and spread if needed
+        try:
+            base_price = float(input("\nEnter base price (default 100.0): ") or 100.0)
+            spread = float(input("Enter spread (default 0.02): ") or 0.02)
+            agent = ValueBasedTrader(name, base_price=base_price, spread=spread)
+            system.add_agent(agent)
+            print(f"\nValueBasedTrader '{name}' created successfully!")
+            print(f"- Base Price: {base_price}")
+            print(f"- Spread: {spread}")
+            print(f"- Bid: {base_price * (1 - spread/2):.2f}")
+            print(f"- Ask: {base_price * (1 + spread/2):.2f}")
+            return agent
+        except ValueError:
+            print("Error: Invalid input for price or spread. Using default values.")
+            agent = ValueBasedTrader(name)
+            system.add_agent(agent)
+            print(f"\nValueBasedTrader '{name}' created with default values.")
+            return agent
+    
+    # Regular Agent creation (original code)
     print("\nAvailable agent types:")
     for i, agent_type in enumerate(AgentType, 1):
         print(f"{i}. {agent_type.value}")
@@ -1632,6 +1872,191 @@ def create_non_financial_asset_interactive(system: EconomicSystem):
         print(f"\nError: {str(e)}")
         return
 
+def create_security_dealer_interactive(system: EconomicSystem):
+    """Interactive function to create a SecurityDealer with all necessary parameters"""
+    print("\nCreating new Security Dealer:")
+    
+    try:
+        # Get dealer name
+        name = input("Enter dealer name: ")
+        if name in system.agents:
+            print(f"Error: Agent '{name}' already exists!")
+            return
+        
+        # Get bond type
+        print("\nSelect bond type to trade:")
+        print("1. Zero-coupon Bond")
+        print("2. Coupon Bond")
+        print("3. Amortizing Bond")
+        bond_type_choice = int(input("Enter choice (1-3): ")) - 1
+        if bond_type_choice == 0:
+            bond_type = BondType.ZERO_COUPON
+        elif bond_type_choice == 1:
+            bond_type = BondType.COUPON
+        elif bond_type_choice == 2:
+            bond_type = BondType.AMORTIZING
+        else:
+            print("Invalid bond type selection!")
+            return
+        
+        # Dealer parameters
+        capital_base = float(input("\nEnter capital base C (e.g., 10000): "))
+        if capital_base <= 0:
+            print("Error: Capital base must be positive!")
+            return
+        quoted_size = int(input("Enter quoted size S_max (e.g., 10): "))
+        if quoted_size <= 0:
+            print("Error: Quoted size must be positive!")
+            return
+        base_spread = float(input("Enter base spread (e.g., 0.001): "))
+        if base_spread < 0:
+            print("Error: Base spread cannot be negative!")
+            return
+        # Initial inventory and cash
+        initial_bond_inventory = int(input("Enter initial bond inventory (e.g., 0): "))
+        initial_cash = float(input("Enter initial cash (press Enter to use capital base): ") or capital_base)
+        # Inventory limit calculation method
+        print("\nSelect inventory limit calculation method:")
+        print("1. Formula: C / p_ref")
+        print("2. Manual input")
+        inv_method_choice = int(input("Enter choice (1-2): "))
+        if inv_method_choice == 2:
+            inventory_limit_method = 'manual'
+            manual_inventory_limit = int(input("Enter manual inventory limit X*: "))
+        else:
+            inventory_limit_method = 'formula'
+            manual_inventory_limit = None
+        # Value trader selection
+        value_traders = [a for a in system.agents.values() if a.type == AgentType.OTHER and a.name != name]
+        value_trader = None
+        if not value_traders:
+            print("\nNo agents of type AgentType.OTHER found in the system.")
+            create_value_trader = input("Would you like to create a value-based trader now? (y/n): ").lower()
+            if create_value_trader == 'y':
+                while True:
+                    value_trader_name = input("Enter value trader name: ")
+                    if value_trader_name in system.agents:
+                        print(f"Error: Agent '{value_trader_name}' already exists!")
+                        continue
+                    if value_trader_name == name:
+                        print("Error: Cannot use the same name as the dealer!")
+                        continue
+                    break
+                # Create a ValueBasedTrader by default
+                try:
+                    base_price = float(input("\nEnter base price for VBT (default 100.0): ") or 100.0)
+                    spread = float(input("Enter spread for VBT (default 0.02): ") or 0.02)
+                    value_trader = ValueBasedTrader(value_trader_name, base_price=base_price, spread=spread)
+                    system.add_agent(value_trader)
+                    print(f"\nValue trader '{value_trader_name}' (VBT) created successfully!")
+                    print(f"- Base Price: {base_price}")
+                    print(f"- Spread: {spread}")
+                    print(f"- Bid: {base_price * (1 - spread/2):.2f}")
+                    print(f"- Ask: {base_price * (1 + spread/2):.2f}")
+                except ValueError:
+                    print("Error: Invalid input for price or spread. Using default values.")
+                    value_trader = ValueBasedTrader(value_trader_name)
+                    system.add_agent(value_trader)
+                    print(f"\nValue trader '{value_trader_name}' (VBT) created with default values.")
+            else:
+                print("Cannot create SecurityDealer without a value trader.")
+                return
+        else:
+            print("\nSelect a value trader to handle excess orders:")
+            for i, trader in enumerate(value_traders, 1):
+                print(f"{i}. {trader.name}")
+            try:
+                trader_idx = int(input("Select value trader (enter number): ")) - 1
+                if trader_idx < 0 or trader_idx >= len(value_traders):
+                    print("Invalid selection. Aborting dealer creation.")
+                    return
+                value_trader = value_traders[trader_idx]
+                
+                # Check if selected trader is a ValueBasedTrader or at least has get_prices method
+                if not isinstance(value_trader, ValueBasedTrader) and not hasattr(value_trader, 'get_prices'):
+                    print(f"\nWarning: Selected agent '{value_trader.name}' is not a ValueBasedTrader and lacks get_prices() method.")
+                    convert = input("Convert to ValueBasedTrader? (y/n): ").strip().lower()
+                    if convert == 'y':
+                        # Create a new ValueBasedTrader with the same name and replace the original
+                        try:
+                            base_price = float(input("\nEnter base price for VBT (default 100.0): ") or 100.0)
+                            spread = float(input("Enter spread for VBT (default 0.02): ") or 0.02)
+                            
+                            # Remove the original agent
+                            old_name = value_trader.name
+                            system.agents.pop(old_name)
+                            
+                            # Create a new ValueBasedTrader with the same name
+                            value_trader = ValueBasedTrader(old_name, base_price=base_price, spread=spread)
+                            system.add_agent(value_trader)
+                            print(f"\nAgent '{old_name}' converted to ValueBasedTrader successfully!")
+                            print(f"- Base Price: {base_price}")
+                            print(f"- Spread: {spread}")
+                        except ValueError:
+                            print("Error: Invalid input. Using default values.")
+                            old_name = value_trader.name
+                            system.agents.pop(old_name)
+                            value_trader = ValueBasedTrader(old_name)
+                            system.add_agent(value_trader)
+                    else:
+                        print("\nWarning: SecurityDealer may not function correctly without a proper ValueBasedTrader.")
+                        continue_anyway = input("Continue anyway? (y/n): ").strip().lower()
+                        if continue_anyway != 'y':
+                            print("Aborting dealer creation.")
+                            return
+            except (ValueError, IndexError):
+                print("Invalid selection. Aborting dealer creation.")
+                return
+        # Use VBT's quote for initial mid price and spread if possible
+        if hasattr(value_trader, 'get_prices'):
+            vbt_bid, vbt_ask = value_trader.get_prices()
+            mid_price = (vbt_bid + vbt_ask) / 2
+            spread = (vbt_ask - vbt_bid) / mid_price
+            print(f"Auto-set dealer mid price from VBT: {mid_price:.2f}")
+            print(f"Auto-set dealer spread from VBT: {spread:.4f}")
+        else:
+            mid_price = float(input("Enter initial mid price (e.g., 100): "))
+            spread = float(input("Enter initial spread (e.g., 0.02 for 2%): "))
+        P_b = mid_price * (1 - spread/2)
+        P_a = mid_price * (1 + spread/2)
+        # Create the SecurityDealer
+        dealer = SecurityDealer(
+            name=name,
+            value_trader=value_trader,
+            bond_type=bond_type,
+            capital_base=capital_base,
+            quoted_size=quoted_size,
+            P_b=P_b,
+            P_a=P_a,
+            base_spread=base_spread,
+            initial_bond_inventory=initial_bond_inventory,
+            initial_cash=initial_cash,
+            inventory_limit_method=inventory_limit_method,
+            manual_inventory_limit=manual_inventory_limit
+        )
+        system.add_agent(dealer)
+        print(f"\nSecurity Dealer '{name}' created successfully!")
+        print(f"1. Bond Type: {bond_type.name}")
+        print(f"2. Initial Pricing:")
+        print(f"   - Mid Price: {mid_price}")
+        print(f"   - Spread: {spread}")
+        print(f"   - Bid: {P_b:.2f}")
+        print(f"   - Ask: {P_a:.2f}")
+        print(f"3. Dealer Parameters:")
+        print(f"   - Capital Base: {capital_base}")
+        print(f"   - Quoted Size: {quoted_size}")
+        print(f"   - Base Spread: {base_spread}")
+        print(f"   - Initial Bond Inventory: {initial_bond_inventory}")
+        print(f"   - Initial Cash: {initial_cash}")
+        print(f"   - Inventory Limit Method: {inventory_limit_method}")
+        if inventory_limit_method == 'manual':
+            print(f"   - Manual Inventory Limit: {manual_inventory_limit}")
+        print(f"4. Value Trader: {value_trader.name}")
+        print(f"5. Initial Inventory Limit: {dealer.inventory_limit}")
+    except (ValueError, IndexError) as e:
+        print(f"\nError: {str(e)}")
+        return
+
 def main():
     print("Welcome to the Economic Balance Sheet Simulation!")
     print("==============================================")
@@ -1656,8 +2081,9 @@ def main():
         print("5. Simulate (finalize agents and pairs)")
         print("6. Export to Excel")
         print("7. Exit")
+        print("8. Create a SecurityDealer")  # new function
 
-        choice = input("\nEnter your choice (1-7): ")
+        choice = input("\nEnter your choice (1-8): ")  
 
         if choice == '1':
             create_agent_interactive(system)
@@ -1708,8 +2134,354 @@ def main():
         elif choice == '7':
             print("\nExiting simulation. Goodbye!")
             break
+        elif choice == '8':  # new function
+            create_security_dealer_interactive(system)
         else:
             print("\nInvalid choice. Please try again.")
+
+class SecurityDealer(Agent):
+    """
+    Passive market maker using Treynor inventory-based pricing.
+    Only trades a single bond type and a single payment asset.
+    """
+    def __init__(self, name, value_trader, bond_type, capital_base=10000.0, quoted_size=10, base_spread=0.001, P_b=100.0, P_a=100.0, initial_bond_inventory=0, initial_cash=None, inventory_limit_method='formula', manual_inventory_limit=None):
+        super().__init__(name, AgentType.OTHER)
+        self.name = name
+        self.value_trader = value_trader
+        self.bond_type = bond_type  # Type of bond being traded
+        self.capital_base = capital_base  # Capital base for inventory limit calculation
+        self.quoted_size = quoted_size    # S_max, max quote size
+        self.S = quoted_size
+        self.base_spread = base_spread
+        self.P_b = P_b
+        self.P_a = P_a
+        self.inventory_bond = initial_bond_inventory  # Initial bond inventory
+        self.inventory_cash = initial_cash if initial_cash is not None else capital_base  # Initial cash, default to capital base
+        self.inventory_limit_method = inventory_limit_method  # 'formula' or 'manual'
+        self.manual_inventory_limit = manual_inventory_limit  # Used if method is manual
+        # Trading statistics
+        self.initial_cash = self.inventory_cash
+        self.trade_count = 0
+        self.total_volume = 0
+        self.layoff_volume = 0
+        self.spreads = []
+        self.trade_prices = []
+        self.trade_volumes = []
+        self._update_inventory_limit()  # Initialize inventory limit
+
+    def _update_inventory_limit(self):
+        """Update inventory limit based on selected method."""
+        if self.inventory_limit_method == 'manual' and self.manual_inventory_limit is not None:
+            self.inventory_limit = int(self.manual_inventory_limit)
+        else:
+            p_ref = (self.P_a + self.P_b) / 2
+            self.inventory_limit = int(self.capital_base / p_ref)  # Formula: C / p_ref
+        self.X_star = self.inventory_limit
+
+    def update_inventory(self, bond_delta, cash_delta):
+        """Adjust bond and cash inventory."""
+        self.inventory_bond += bond_delta
+        self.inventory_cash += cash_delta
+        
+        # Update trading statistics
+        if bond_delta != 0:  # Only count actual trades
+            self.trade_count += 1
+            self.total_volume += abs(bond_delta)
+            self.trade_volumes.append(abs(bond_delta))
+            self.trade_prices.append(-cash_delta / bond_delta)  # Price per bond
+
+    def get_prices(self):
+        """
+        Dynamic inventory-based pricing according to professor's formula
+        """
+        try:
+            # Try to get prices from value trader
+            if hasattr(self.value_trader, 'get_prices'):
+                P_b, P_a = self.value_trader.get_prices()
+            else:
+                # Fallback if value_trader has no get_prices method
+                print(f"Warning: {self.value_trader.name} has no get_prices method. Using current P_b, P_a.")
+                P_b, P_a = self.P_b, self.P_a
+        except Exception as e:
+            # Fallback in case of any error
+            print(f"Error getting prices from value trader: {str(e)}. Using current values.")
+            P_b, P_a = self.P_b, self.P_a
+            
+        self.P_b = P_b  # Update reference prices
+        self.P_a = P_a
+        self._update_inventory_limit()  # Update inventory limit
+        
+        X = self.inventory_bond
+        X_star = self.inventory_limit
+        S = self.quoted_size
+
+        # Compute dynamic spread and slope
+        spread_dyn = (S / (2 * X_star)) * (P_a - P_b)
+        delta = (P_a - P_b) / (2 * X_star + S)
+
+        # Compute dynamic mid-price
+        mid_dyn = (P_a + P_b) / 2 + delta * X
+
+        # Return bid and ask
+        bid = mid_dyn - spread_dyn / 2
+        ask = mid_dyn + spread_dyn / 2
+        return bid, ask
+
+    def handle_order(self, side, quantity, price=None, system=None, counterparty=None):
+        """
+        Process a 'buy' or 'sell' order within inventory limits.
+        Forward any excess quantity to the value-based trader.
+        
+        Args:
+            side: 'buy' or 'sell'
+            quantity: Number of units to trade
+            price: Optional explicit price, if None use standard bid/ask
+            system: EconomicSystem instance to create asset-liability pairs
+            counterparty: The agent initiating the trade
+        """
+        bid, ask = self.get_prices()
+        self.spreads.append(ask - bid)  # Record current spreadni
+        
+        # If price is None, use standard bid or ask price
+        trade_price = price if price is not None else (ask if side == 'buy' else bid)
+        
+        print(f"DEBUG: {self.name} handling {side} order for {quantity} @ {trade_price}")
+        print(f"DEBUG: Current inventory: {self.inventory_bond}, limit: {self.inventory_limit}")
+        
+        if side == 'buy':
+            # Trader buys bonds from dealer (dealer sells)
+            available = self.inventory_bond
+            if available <= 0:
+                print(f"DEBUG: {self.name} has no inventory to sell, forwarding full order to VBT")
+                self.layoff_volume += quantity
+                try:
+                    # Forward entire order to value trader
+                    self.value_trader.handle_order(side, quantity, price=trade_price, system=system)
+                except Exception as e:
+                    print(f"Warning: Could not forward order to value trader: {str(e)}")
+                return  # Exit early, nothing to process locally
+                
+            # Process what we can with our inventory
+            exec_qty = min(quantity, available)
+            print(f"DEBUG: {self.name} executing {exec_qty} of {quantity} {side} order")
+            
+            # Dealer cash increases by exec_qty * price, bond decreases
+            self.update_inventory(-exec_qty, exec_qty * trade_price)
+            print(f"DEBUG: After execution, inventory: {self.inventory_bond}, cash: {self.inventory_cash}")
+            
+            # Create asset-liability entries if system and counterparty are provided
+            if system and counterparty and hasattr(system, 'create_asset_liability_pair'):
+                # Create a zero-coupon bond (trader buys, dealer sells)
+                now = datetime.now()
+                maturity_date = datetime(2100, 1, 1)  # t2
+                pair = AssetLiabilityPair(
+                    time=now,
+                    type=EntryType.BOND_ZERO_COUPON.value,
+                    amount=exec_qty,
+                    denomination="USD",
+                    maturity_type=MaturityType.FIXED_DATE,
+                    maturity_date=maturity_date,
+                    settlement_type=SettlementType.MEANS_OF_PAYMENT,
+                    settlement_denomination="USD",
+                    asset_holder=counterparty,  # Buyer gets the bond
+                    liability_holder=self,      # Dealer issues the bond
+                )
+                system.create_asset_liability_pair(pair)
+                print(f"Created asset-liability pair: {counterparty.name} buys {exec_qty} bonds from {self.name}")
+            
+            # Only forward remainder if needed
+            if quantity > exec_qty:
+                remainder = quantity - exec_qty
+                self.layoff_volume += remainder
+                print(f"DEBUG: {self.name} forwarding remaining {remainder} to VBT")
+                try:
+                    # Forward excess order to value trader with same price
+                    self.value_trader.handle_order(side, remainder, price=trade_price, system=system, counterparty=counterparty)
+                except Exception as e:
+                    print(f"Warning: Could not forward excess order to value trader: {str(e)}")
+                    
+        elif side == 'sell':
+            # Trader sells bonds to dealer (dealer buys)
+            space = self.inventory_limit - self.inventory_bond
+            if space <= 0:
+                print(f"DEBUG: {self.name} at inventory limit, forwarding full order to VBT")
+                self.layoff_volume += quantity
+                try:
+                    # Forward entire order to value trader
+                    self.value_trader.handle_order(side, quantity, price=trade_price, system=system, counterparty=counterparty)
+                except Exception as e:
+                    print(f"Warning: Could not forward order to value trader: {str(e)}")
+                return  # Exit early, nothing to process locally
+                
+            # Process what we can within our limits
+            exec_qty = min(quantity, space)
+            print(f"DEBUG: {self.name} executing {exec_qty} of {quantity} {side} order")
+            
+            # Dealer bond increases, cash decreases by exec_qty * price
+            self.update_inventory(exec_qty, -exec_qty * trade_price)
+            print(f"DEBUG: After execution, inventory: {self.inventory_bond}, cash: {self.inventory_cash}")
+            
+            # Create asset-liability entries if system and counterparty are provided
+            if system and counterparty and hasattr(system, 'create_asset_liability_pair'):
+                # Create a zero-coupon bond (dealer buys, trader sells)
+                now = datetime.now()
+                maturity_date = datetime(2100, 1, 1)  # t2
+                pair = AssetLiabilityPair(
+                    time=now,
+                    type=EntryType.BOND_ZERO_COUPON.value,
+                    amount=exec_qty,
+                    denomination="USD",
+                    maturity_type=MaturityType.FIXED_DATE,
+                    maturity_date=maturity_date,
+                    settlement_type=SettlementType.MEANS_OF_PAYMENT,
+                    settlement_denomination="USD",
+                    asset_holder=self,          # Dealer gets the bond
+                    liability_holder=counterparty,  # Seller issues the bond
+                )
+                system.create_asset_liability_pair(pair)
+                print(f"Created asset-liability pair: {self.name} buys {exec_qty} bonds from {counterparty.name}")
+            
+            # Only forward remainder if needed
+            if quantity > exec_qty:
+                remainder = quantity - exec_qty
+                self.layoff_volume += remainder
+                print(f"DEBUG: {self.name} forwarding remaining {remainder} to VBT")
+                try:
+                    # Forward excess order to value trader with same price  
+                    self.value_trader.handle_order(side, remainder, price=trade_price, system=system, counterparty=counterparty)
+                except Exception as e:
+                    print(f"Warning: Could not forward excess order to value trader: {str(e)}")
+        else:
+            raise ValueError("Order side must be 'buy' or 'sell'")
+
+    def get_trading_statistics(self):
+        """Calculate and return trading statistics"""
+        if not self.trade_prices:
+            return {
+                'final_inventory': self.inventory_bond,
+                'layoff_volume': self.layoff_volume,
+                'total_volume': self.total_volume,
+                'trade_count': self.trade_count,
+                'pnl': self.inventory_cash - self.initial_cash,
+                'avg_spread': 0,
+                'min_spread': 0,
+                'max_spread': 0,
+                'avg_trade_price': 0,
+                'avg_trade_volume': 0
+            }
+            
+        return {
+            'final_inventory': self.inventory_bond,
+            'layoff_volume': self.layoff_volume,
+            'total_volume': self.total_volume,
+            'trade_count': self.trade_count,
+            'pnl': self.inventory_cash - self.initial_cash,
+            'avg_spread': sum(self.spreads) / len(self.spreads),
+            'min_spread': min(self.spreads),
+            'max_spread': max(self.spreads),
+            'avg_trade_price': sum(self.trade_prices) / len(self.trade_prices),
+            'avg_trade_volume': sum(self.trade_volumes) / len(self.trade_volumes)
+        }
+
+    def update_vbt_quotes(self):
+        """Stub: update self.P_b, self.P_a for next cycle."""
+        # currently: keep self.P_b, self.P_a unchanged
+        pass
+
+class ValueBasedTrader(Agent):
+    """
+    Value-Based Trader (VBT) stub.
+    Returns simulated bid/ask prices for use by SecurityDealer.
+    """
+    def __init__(self, name, base_price=100.0, spread=0.02):
+        super().__init__(name, AgentType.OTHER)
+        self.base_price = base_price
+        self.spread = spread
+        self.inventory_bond = 0  # Track bonds inventory
+        self.inventory_cash = 0.0  # Track cash
+
+    def get_prices(self):
+        """Return a simulated bid/ask around base_price."""
+        bid = self.base_price * (1 - self.spread / 2)
+        ask = self.base_price * (1 + self.spread / 2)
+        return bid, ask
+        
+    def handle_order(self, side, quantity, price=None, system=None):
+        """
+        Process orders from dealers that exceed their inventory limits.
+        
+        Args:
+            side: 'buy' or 'sell'
+            quantity: Number of units to trade
+            price: Optional price, if None use VBT prices
+            system: EconomicSystem instance for creating asset-liability pairs
+        """
+        bid, ask = self.get_prices()
+        
+        # Determine execution price
+        trade_price = price if price is not None else (ask if side == 'buy' else bid)
+        
+        if side == 'buy':
+            # VBT sells bonds to the client
+            # Increase cash, decrease bonds
+            self.inventory_cash += quantity * trade_price
+            self.inventory_bond -= quantity
+            print(f"  {self.name} executed layoff order: sold {quantity} @ {trade_price:.2f}")
+            
+            # Create bond asset for the buyer if system is provided
+            if system and hasattr(system, 'create_asset_liability_pair'):
+                # Find counterparty (the dealer's counterparty)
+                counterparties = [a for a in system.agents.values() if a.type == AgentType.COMPANY]
+                if counterparties:
+                    # Create Bond Zero Coupon (buyer gets bond, VBT issues liability)
+                    now = datetime.now()
+                    maturity_date = datetime(2100, 1, 1)  # t2
+                    pair = AssetLiabilityPair(
+                        time=now,
+                        type=EntryType.BOND_ZERO_COUPON.value,
+                        amount=quantity,
+                        denomination="USD",
+                        maturity_type=MaturityType.FIXED_DATE,
+                        maturity_date=maturity_date,
+                        settlement_type=SettlementType.MEANS_OF_PAYMENT,
+                        settlement_denomination="USD",
+                        asset_holder=counterparties[0],  # Buyer gets the bond
+                        liability_holder=self,  # VBT issues the bond
+                    )
+                    system.create_asset_liability_pair(pair)
+                    print(f"  Created bond asset-liability pair: {counterparties[0].name} <-> {self.name}")
+        
+        elif side == 'sell':
+            # VBT buys bonds from the client
+            # Decrease cash, increase bonds
+            self.inventory_cash -= quantity * trade_price
+            self.inventory_bond += quantity
+            print(f"  {self.name} executed layoff order: bought {quantity} @ {trade_price:.2f}")
+            
+            # Create bond liability for the seller if system is provided
+            if system and hasattr(system, 'create_asset_liability_pair'):
+                # Find counterparty (the dealer's counterparty)
+                counterparties = [a for a in system.agents.values() if a.type == AgentType.COMPANY]
+                if counterparties:
+                    # Create Bond Zero Coupon (VBT gets bond, seller issues liability)
+                    now = datetime.now()
+                    maturity_date = datetime(2100, 1, 1)  # t2
+                    pair = AssetLiabilityPair(
+                        time=now,
+                        type=EntryType.BOND_ZERO_COUPON.value,
+                        amount=quantity,
+                        denomination="USD",
+                        maturity_type=MaturityType.FIXED_DATE,
+                        maturity_date=maturity_date,
+                        settlement_type=SettlementType.MEANS_OF_PAYMENT,
+                        settlement_denomination="USD",
+                        asset_holder=self,  # VBT gets the bond
+                        liability_holder=counterparties[0],  # Seller issues the bond
+                    )
+                    system.create_asset_liability_pair(pair)
+                    print(f"  Created bond asset-liability pair: {self.name} <-> {counterparties[0].name}")
+        else:
+            raise ValueError("Order side must be 'buy' or 'sell'")
 
 if __name__ == "__main__":
     main()
