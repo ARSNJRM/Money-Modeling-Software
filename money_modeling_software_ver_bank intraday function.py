@@ -50,6 +50,8 @@ class AgentType(Enum):
 
 class EntryType(Enum):
     LOAN = "loan"
+    INTRADAY_IOU = "intraday_iou"
+    OVERNIGHT_LOAN = "overnight_loan"
     DEPOSIT = "deposit"  # No maturity or settlement type
     PAYABLE = "payable"  # Always means of payment settlement
     BOND = "bond"
@@ -244,73 +246,131 @@ class Agent:
             asset_holder = receiver_bank,
             liability_holder = sender_bank
         )
-        system.create_asset_liability_pair(pair)
+        sender_bank.system.create_asset_liability_pair(pair)
 
 class BankIntradayModule:
-    """Intraday liquidity management module for banks, handling settlement, rollover, and default of intraday IOUs."""
+    """Intraday liquidity management module for banks, handling settlement, rollover, overnight loan conversion, and default."""
 
     def __init__(self, bank_agent):
-        """Initialize the intraday module and link it to the specified bank agent."""
         self.bank = bank_agent
         self.settlement_log = []  # Record settlement operations
         self.system = None  # Will be set by the bank after creation
 
     def _find_iou_counterparty(self, iou_entry):
         """Find the counterparty agent for the IOU."""
-        return next(
-            (agent for agent in self.bank.system.agents.values()
-             if agent.name == iou_entry.counterparty),
-            None
+        counterparty = next(
+        (agent for agent in self.bank.system.agents.values() if agent.name == iou_entry.counterparty),
+        None
+    )
+        if counterparty is None:
+            self.settlement_log.append(f"Counterparty {iou_entry.counterparty} not found for IOU settlement")
+            raise ValueError(f"Counterparty {iou_entry.counterparty} not found")
+        return counterparty
+
+    def _settle_partial(self, iou_entry, time_point):
+        """
+        Attempt to settle as much as possible of the IOU using available deposits.
+        Supports partial settlement if full amount is not available.
+        Returns the amount settled (0 if none).
+        """
+        # Find all deposits in the bank with matching denomination, sorted descending by amount
+        deposits = sorted(
+            (a for a in self.bank.assets if a.type == EntryType.DEPOSIT and a.denomination == iou_entry.denomination),
+            key=lambda x: x.amount,
+            reverse=True
         )
 
-    def _settle_full(self, iou_entry, time_point):
-        """Attempt to fully settle the IOU. Return True if successful."""
-        # Find a deposit asset with sufficient amount
-        deposit = next(
-            (a for a in self.bank.assets
-             if a.type == EntryType.DEPOSIT and a.amount >= iou_entry.amount),
-            None
-        )
+        amount_to_settle = iou_entry.amount
+        total_settled = 0.0
 
-        if not deposit:
-            return False  # No sufficient deposit, cannot settle
+        for deposit in deposits:
+            if amount_to_settle <= 0:
+                break
+            settle_amount = min(deposit.amount, amount_to_settle)
 
-        self.bank.remove_asset(deposit)
-        receiver = self._find_iou_counterparty(iou_entry)
+            # Remove or reduce deposit accordingly
+            if deposit.amount == settle_amount:
+                self.bank.remove_asset(deposit)
+            else:
+                deposit.amount -= settle_amount
 
-        # Create a new deposit for the receiver
-        new_deposit = BalanceSheetEntry(
-            type=EntryType.DEPOSIT,
-            is_asset=True,
-            counterparty=self.bank.name,
-            amount=iou_entry.amount,
-            denomination=iou_entry.denomination,
-            maturity_type=MaturityType.ON_DEMAND,
-            maturity_date=None,
-            settlement_details=SettlementDetails(
-                type=SettlementType.MEANS_OF_PAYMENT,
-                denomination=iou_entry.denomination
-            ),
-            issuance_time=time_point
-        )
+            # Find counterparty bank to receive the deposit
+            receiver = self._find_iou_counterparty(iou_entry)
 
-        receiver.add_asset(new_deposit)
-        return True
+            # Create new deposit asset for receiver bank with settle_amount
+            new_deposit = BalanceSheetEntry(
+                type=EntryType.DEPOSIT,
+                is_asset=True,
+                counterparty=self.bank.name,
+                amount=settle_amount,
+                denomination=iou_entry.denomination,
+                maturity_type=MaturityType.ON_DEMAND,
+                maturity_date=None,
+                settlement_details=SettlementDetails(
+                    type=SettlementType.MEANS_OF_PAYMENT,
+                    denomination=iou_entry.denomination
+                ),
+                issuance_time=time_point
+            )
+            receiver.add_asset(new_deposit)
+
+            total_settled += settle_amount
+            amount_to_settle -= settle_amount
+
+        if total_settled > 0:
+            # Reduce IOU amount by settled amount
+            iou_entry.amount -= total_settled
+            # If fully settled, remove IOU liability
+            if iou_entry.amount <= 0:
+                self.bank.remove_liability(iou_entry)
+            return total_settled
+        else:
+            return 0.0
 
     def _evaluate_rollover_proposal(self, iou_entry, receiver_bank):
-        """Evaluate whether the rollover is allowed (based on reserve balance)."""
-        reserves = sum(
+        """
+        Evaluate whether the rollover (rollover of intraday IOU) is allowed based on the receiver bank's reserve deposits
+        and total deposits, using the reserve requirement ratio (RRR).
+
+        The logic follows these steps:
+        1. Calculate the total reserve deposits (RD) held by the receiver bank.
+        2. Calculate the total bank deposits (BD) held by the receiver bank (excluding reserves).
+        3. Compute the surplus reserve (SR) as: SR = RD - (RRR * BD).
+           - If SR is negative, it indicates a reserve deficit.
+        4. If there is a reserve deficit (SR < 0):
+           - If the IOU amount is less than or equal to the deficit, reject the rollover.
+           - Otherwise, approve the rollover but only for the amount exceeding the deficit.
+        5. If there is no reserve deficit (SR >= 0), approve the rollover fully.
+
+        Returns:
+            bool: True if rollover is approved, False otherwise.
+        """
+        RRR = 0.10  # Reserve requirement ratio, adjust as needed
+
+        reserve_deposits = sum(
             asset.amount for asset in receiver_bank.assets
             if asset.type == EntryType.DEPOSIT and asset.denomination == "reserves"
         )
-        return reserves >= 1000  # Reserve threshold
+        bank_deposits = sum(
+            asset.amount for asset in receiver_bank.assets
+            if asset.type == EntryType.DEPOSIT and asset.denomination != "reserves"
+        )
+
+        surplus_reserve = reserve_deposits - (RRR * bank_deposits)
+
+        if surplus_reserve < 0:
+            deficit_reserve = abs(surplus_reserve)
+            if iou_entry.amount <= deficit_reserve:
+                return False
+            else:
+                return True
+        else:
+            return True
 
     def _handle_rollover(self, iou_entry, time_point):
-        """Handle IOU rollover or proceed to default if not allowed."""
+        """Handle IOU rollover: if accepted, create a new IOU with extended maturity; if rejected, handle default."""
         receiver = self._find_iou_counterparty(iou_entry)
-
         if receiver and self._evaluate_rollover_proposal(iou_entry, receiver):
-            # Create a new rolled-over IOU, increment rollover count
             new_iou = BalanceSheetEntry(
                 type=EntryType.INTRADAY_IOU,
                 is_asset=False,
@@ -328,16 +388,15 @@ class BankIntradayModule:
                 rollover_count=iou_entry.rollover_count + 1
             )
             self.bank.add_liability(new_iou)
-            self.settlement_log.append(f"{time_point} Rollover: IOU #{iou_entry.rollover_count+1} for {iou_entry.amount}")
+            self.settlement_log.append(f"{time_point} Rollover: IOU #{iou_entry.rollover_count + 1} for {iou_entry.amount}")
+            self.bank.remove_liability(iou_entry)
         else:
-            # If rollover not allowed, handle as default
             self._handle_default(iou_entry, time_point)
 
     def _handle_default(self, iou_entry, time_point):
-        """Handle default: obtain emergency loan from the central bank."""
+        """Handle default by obtaining an emergency loan from the central bank; if failed, mark bank as bankrupt."""
         try:
-            cb = next(a for a in self.bank.system.agents.values()
-                      if a.type == AgentType.CENTRAL_BANK)
+            cb = next(a for a in self.bank.system.agents.values() if a.type == AgentType.CENTRAL_BANK)
             emergency_loan = AssetLiabilityPair(
                 time=datetime.now(),
                 type=EntryType.LOAN.value,
@@ -352,23 +411,35 @@ class BankIntradayModule:
             )
             self.bank.system.create_asset_liability_pair(emergency_loan)
             self.settlement_log.append(f"{time_point} Default operation: Central Bank loan for {iou_entry.amount}")
+            self.bank.remove_liability(iou_entry)
         except Exception as e:
             self.settlement_log.append(f"{time_point} Default operation failed: {str(e)}")
             self.bank.status = "bankrupt"
 
     def process_intraday_settlement(self, time_point):
-        """Main function to process all intraday IOU settlements."""
+        """Process all intraday IOU settlements for the bank, supporting partial settlement."""
         for liability in list(self.bank.liabilities):
             if liability.type != EntryType.INTRADAY_IOU:
                 continue
-            if self._settle_full(liability, time_point):
-                self.bank.remove_liability(liability)
-                self.settlement_log.append(f"{time_point} Successfully transaction: {liability.amount}")
-                continue
-            if self.bank.status == "operating":
-                self._handle_rollover(liability, time_point)
+
+            settled_amount = self._settle_partial(liability, time_point)
+
+            if settled_amount == 0:
+                # No settlement possible, try rollover or default
+                if self.bank.status == "operating":
+                    self._handle_rollover(liability, time_point)
+                else:
+                    self._handle_default(liability, time_point)
+            elif liability.amount <= 0:
+                # Fully settled, already removed
+                self.settlement_log.append(f"{time_point} Fully settled IOU of {settled_amount}")
             else:
-                self._handle_default(liability, time_point)
+                # Partially settled, attempt rollover or default on remaining amount
+                self.settlement_log.append(f"{time_point} Partially settled IOU of {settled_amount}, remaining {liability.amount}")
+                if self.bank.status == "operating":
+                    self._handle_rollover(liability, time_point)
+                else:
+                    self._handle_default(liability, time_point)
 
 class AssetLiabilityPair:
     def __init__(self,
