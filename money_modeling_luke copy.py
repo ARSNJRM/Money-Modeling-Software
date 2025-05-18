@@ -914,7 +914,14 @@ class EconomicSystem:
                and l.maturity_date == self.current_time_state
         ]
         for agent, liability in maturing:
-            pass
+            can_settle, reason = self.can_settle_entry(agent, liability)
+
+            if not can_settle:
+                print(f"\nDEFAULT DETECTED: {agent.name} cannot settle {liability.type.value} ({reason})")
+                agent.status = 'defaulting'
+
+            if self.current_time_state > 0:
+                self.settle_entries(self.current_time_state)
 
     def resolve_nonbank_defaults(self):
         '''Process all non-bank agents marked as 'defaulting': recover assets and allocate to creditors.'''
@@ -1043,58 +1050,8 @@ class EconomicSystem:
 
         for time in range(time_points):
             print(f"\nProcessing time {time}...")
-
-            # should do nothing currently
             self.run_actions()
-
-            # Get all entries that mature at this time point
-            maturing_entries = []
-            for agent in self.agents.values():
-                for liability in agent.liabilities:
-                    if liability.maturity_type == MaturityType.FIXED_DATE:
-                        if liability.maturity_date == time:
-                            maturing_entries.append((agent, liability))
-
-            # Try to settle each entry
-            for agent, liability in maturing_entries:
-                can_settle, reason = self.can_settle_entry(agent, liability)
-
-                if not can_settle:
-                    print(f"\nDEFAULT DETECTED: {agent.name} cannot settle {liability.type.value}")
-                    print(f"Reason: {reason}")
-
-                    # Find the corresponding asset holder
-                    asset_holder = next(a for a in self.agents.values()
-                                      if a.name == liability.counterparty)
-
-                    # Remove the original asset-liability pair
-                    try:
-                        asset_entry = next(a for a in asset_holder.assets
-                                     if a.matches(liability))
-                    except StopIteration:
-                        print("\nCould not find matching asset for liability during default.")
-                        print("Liability being matched:")
-                        print(vars(liability))
-                        print("\nAll candidate assets:")
-                        for a in asset_holder.assets:
-                            print(vars(a))
-                        raise
-                    asset_holder.remove_asset(asset_entry)
-                    agent.remove_liability(liability)
-
-                    # Create and add default entries
-                    default_claim, default_liability = self.create_default_entries(liability)
-                    asset_holder.add_asset(default_claim)
-                    agent.add_liability(default_liability)
-
-                    # Save state after default
-                    self.save_state(time)
-                    return False  # Stop simulation
-
-            # If we get here, try to settle all entries for this time point
-            if time > 0:
-                self.settle_entries(time)
-
+            
         print("\nSimulation completed successfully!")
         return True
 
