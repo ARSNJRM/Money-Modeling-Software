@@ -47,6 +47,7 @@ class MaturityType(Enum):
     ON_DEMAND = "on_demand"
     FIXED_DATE = "fixed_date"
     PERPETUAL = "perpetual"
+    # NONE = "none"  # for non-financial assets
 
 class SettlementType(Enum):
     MEANS_OF_PAYMENT = "means_of_payment"
@@ -623,7 +624,8 @@ class AssetLiabilityPair:
                 
         if self.type == EntryType.DELIVERY_CLAIM.value:
             if not self.asset_name:
-                raise ValueError("Delivery claims must specify assets to be delivered")
+                self.asset_name = input("Enter the name of the asset to be delivered: ")
+                # raise ValueError("Delivery claims must specify assets to be delivered")
 
             settlement_details = SettlementDetails(
                 type=SettlementType.NON_FINANCIAL_ASSET,
@@ -1773,7 +1775,7 @@ def main_interactive():
         print("\n--- Menu ---")
         print("1. Create agent")
         print("2. Create asset-liability pair")
-        print("3. Operations")
+        print("3. Actions")
         print("4. Settle due entries")
         print("5. Run scheduled actions")
         print("6. View balance sheets")
@@ -1804,61 +1806,149 @@ def main_interactive():
                 bond_type = None
                 coupon_rate = None
                 
-                if entry_type != EntryType.NON_FINANCIAL:
+                if entry_type == EntryType.NON_FINANCIAL:
+                    asset_name = get_input("Enter name for non-financial asset: ")
+                    amount = get_input("Enter amount: ", float)
+                    denomination = get_input("Enter denomination (USD, shares, reserves, etc.): ")
+                    maturity_type = MaturityType.ON_DEMAND
+                    maturity_date = None
+                    if maturity_type == MaturityType.FIXED_DATE:
+                        maturity_date = get_input("Enter maturity date: ", int, choices=[1, 2])
+                    
+                    settlement_type = SettlementType.NONE
+                    settlement_denomination = denomination
+                    if settlement_type != SettlementType.NONE:
+                        settlement_denomination = get_input("Enter denomination: ")
+                    
+                    cash_flow_at_maturity = 0
+                    if maturity_type == MaturityType.FIXED_DATE:
+                        cash_flow_at_maturity = get_input("Enter cash flow at maturity (if applicable): ", float)
+                        
+                    if entry_type in [EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
+                        bond_type = select_enum(BondType, "Enter bond type")
+                        coupon_rate = get_input("Enter coupon rate: ", float)
+                    elif entry_type == EntryType.BOND_ZERO_COUPON:
+                        bond_type = BondType.ZERO_COUPON
+
+                    pair = AssetLiabilityPair(
+                        time=system.current_time_state,
+                        type=entry_type.value,
+                        amount=amount,
+                        denomination=denomination,
+                        maturity_type=maturity_type,
+                        maturity_date=maturity_date,
+                        settlement_type=settlement_type,
+                        settlement_denomination=settlement_denomination,
+                        asset_holder=asset_holder,
+                        liability_holder=liability_holder,
+                        cash_flow_at_maturity=cash_flow_at_maturity,
+                        asset_name=asset_name,
+                        bond_type=bond_type,
+                        coupon_rate=coupon_rate
+                    )
+                    system.create_asset_liability_pair(pair)
+                    print("asset-liability pair created successfully.")
+                
+                elif entry_type == EntryType.DEPOSIT:
                     liability_holder = select_agent(system, "select liability holder")
                     if not liability_holder:
                         continue
+
+                    amount = get_input("Enter amount: ", float)
+                    denomination = get_input("Enter denomination (USD, shares, reserves, etc.): ")
+                    maturity_type = MaturityType.ON_DEMAND
+                    maturity_date = None
+                    if maturity_type == MaturityType.FIXED_DATE:
+                        maturity_date = get_input("Enter maturity date: ", int, choices=[1, 2])
+                    
+                    settlement_type = SettlementType.NONE
+                    settlement_denomination = denomination
+                    if settlement_type != SettlementType.NONE:
+                        settlement_denomination = get_input("Enter denomination: ")
+                    
+                    cash_flow_at_maturity = 0
+                    if maturity_type == MaturityType.FIXED_DATE:
+                        cash_flow_at_maturity = get_input("Enter cash flow at maturity (if applicable): ", float)
+                        
+                    if entry_type in [EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
+                        bond_type = select_enum(BondType, "Enter bond type")
+                        coupon_rate = get_input("Enter coupon rate: ", float)
+                    elif entry_type == EntryType.BOND_ZERO_COUPON:
+                        bond_type = BondType.ZERO_COUPON
+
+                    pair = AssetLiabilityPair(
+                        time=system.current_time_state,
+                        type=entry_type.value,
+                        amount=amount,
+                        denomination=denomination,
+                        maturity_type=maturity_type,
+                        maturity_date=maturity_date,
+                        settlement_type=settlement_type,
+                        settlement_denomination=settlement_denomination,
+                        asset_holder=asset_holder,
+                        liability_holder=liability_holder,
+                        cash_flow_at_maturity=cash_flow_at_maturity,
+                        asset_name=asset_name,
+                        bond_type=bond_type,
+                        coupon_rate=coupon_rate
+                    )
+                    system.create_asset_liability_pair(pair)
+                    print("asset-liability pair created successfully.")
+
+                
                 else:
-                    asset_name = get_input("Enter name for non-financial asset: ")
+                    liability_holder = select_agent(system, "select liability holder")
+                    if not liability_holder:
+                        continue
 
-                amount = get_input("Enter amount: ", float)
-                denomination = get_input("Enter denomination (USD, shares, reserves, etc.): ")
-                maturity_type = select_enum(MaturityType, "select maturity type")
-                maturity_date = None
-                if maturity_type == MaturityType.FIXED_DATE:
-                    maturity_date = get_input("Enter maturity date: ", int, choices=[1, 2])
-                
-                settlement_type = select_enum(SettlementType, "select settlement type")
-                settlement_denomination = denomination
-                if settlement_type != SettlementType.NONE:
-                     settlement_denomination = get_input("Enter denomination: ")
-                
-                cash_flow_at_maturity = 0
-                if maturity_type == MaturityType.FIXED_DATE:
-                     cash_flow_at_maturity = get_input("Enter cash flow at maturity (if applicable): ", float)
-                     
-                if entry_type in [EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
-                    bond_type = select_enum(BondType, "Enter bond type")
-                    coupon_rate = get_input("Enter coupon rate: ", float)
-                elif entry_type == EntryType.BOND_ZERO_COUPON:
-                     bond_type = BondType.ZERO_COUPON
+                    amount = get_input("Enter amount: ", float)
+                    denomination = get_input("Enter denomination (USD, shares, reserves, etc.): ")
+                    maturity_type = select_enum(MaturityType, "select maturity type")
+                    maturity_date = None
+                    if maturity_type == MaturityType.FIXED_DATE:
+                        maturity_date = get_input("Enter maturity date: ", int, choices=[1, 2])
+                    
+                    settlement_type = select_enum(SettlementType, "select settlement type")
+                    settlement_denomination = denomination
+                    if settlement_type != SettlementType.NONE:
+                        settlement_denomination = get_input("Enter denomination: ")
+                    
+                    cash_flow_at_maturity = 0
+                    if maturity_type == MaturityType.FIXED_DATE:
+                        cash_flow_at_maturity = get_input("Enter cash flow at maturity (if applicable): ", float)
+                        
+                    if entry_type in [EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
+                        bond_type = select_enum(BondType, "Enter bond type")
+                        coupon_rate = get_input("Enter coupon rate: ", float)
+                    elif entry_type == EntryType.BOND_ZERO_COUPON:
+                        bond_type = BondType.ZERO_COUPON
 
-                pair = AssetLiabilityPair(
-                    time=system.current_time_state,
-                    type=entry_type.value,
-                    amount=amount,
-                    denomination=denomination,
-                    maturity_type=maturity_type,
-                    maturity_date=maturity_date,
-                    settlement_type=settlement_type,
-                    settlement_denomination=settlement_denomination,
-                    asset_holder=asset_holder,
-                    liability_holder=liability_holder,
-                    cash_flow_at_maturity=cash_flow_at_maturity,
-                    asset_name=asset_name,
-                    bond_type=bond_type,
-                    coupon_rate=coupon_rate
-                )
-                system.create_asset_liability_pair(pair)
-                print("asset-liability pair created successfully.")
+                    pair = AssetLiabilityPair(
+                        time=system.current_time_state,
+                        type=entry_type.value,
+                        amount=amount,
+                        denomination=denomination,
+                        maturity_type=maturity_type,
+                        maturity_date=maturity_date,
+                        settlement_type=settlement_type,
+                        settlement_denomination=settlement_denomination,
+                        asset_holder=asset_holder,
+                        liability_holder=liability_holder,
+                        cash_flow_at_maturity=cash_flow_at_maturity,
+                        asset_name=asset_name,
+                        bond_type=bond_type,
+                        coupon_rate=coupon_rate
+                    )
+                    system.create_asset_liability_pair(pair)
+                    print("asset-liability pair created successfully.")
 
             elif choice == 3:
-                print("\n--- Operations ---")
+                print("\n--- Actions ---")
                 time_point = get_input("Enter executing time: ", int, choices=[1, 2])
                 
                 action_types = [
-                    'Issue Loan', 'Repay Loan', 'Issue Bond', 'Repay Bond', 
-                    'Issue Share', 'Pay Dividend', 'Transfer Customer Deposit', 
+                    'Issue', 'Repay Loan', 'Repay Bond', 
+                    'Pay Dividend', 'Transfer Customer Deposit', 
                     'Process Intraday Settlements'
                 ]
                 print("Applicable types:")
@@ -1868,16 +1958,163 @@ def main_interactive():
                 action_type = action_types[action_choice - 1]
                 
                 params = {}
-                if action_type == 'Issue Loan':
-                    lender = select_agent(system, "Select lender")
-                    borrower = select_agent(system, "Select borrower")
-                    if lender and borrower:
-                        params['lender'] = lender.name
-                        params['borrower'] = borrower.name
-                        params['amount'] = get_input("Enter amount: ", float)
-                        params['interest_rate'] = get_input("Enter interest rate: ", float)
-                        params['maturity'] = get_input("Enter maturity date: ", int, choices=[1, 2])
-                        params['denomination'] = get_input("Enter denomination: ", str)
+                # if action_type == 'Issue Loan':
+                #     lender = select_agent(system, "Select lender")
+                #     borrower = select_agent(system, "Select borrower")
+                #     if lender and borrower:
+                #         params['lender'] = lender.name
+                #         params['borrower'] = borrower.name
+                #         params['amount'] = get_input("Enter amount: ", float)
+                #         params['interest_rate'] = get_input("Enter interest rate: ", float)
+                #         params['maturity'] = get_input("Enter maturity date: ", int, choices=[1, 2])
+                #         params['denomination'] = get_input("Enter denomination: ", str)
+                if action_type == 'Issue':
+                    asset_holder = select_agent(system, "select asset holder")
+                    if not asset_holder:
+                        continue
+                    
+                    entry_type = select_enum(EntryType, "select entry type")
+                    
+                    liability_holder = None
+                    asset_name = None
+                    bond_type = None
+                    coupon_rate = None
+                    
+                    if entry_type == EntryType.NON_FINANCIAL:
+                        asset_name = get_input("Enter name for non-financial asset: ")
+                        amount = get_input("Enter amount: ", float)
+                        denomination = get_input("Enter denomination (USD, shares, reserves, etc.): ")
+                        maturity_type = MaturityType.ON_DEMAND
+                        maturity_date = None
+                        if maturity_type == MaturityType.FIXED_DATE:
+                            maturity_date = get_input("Enter maturity date: ", int, choices=[1, 2])
+                        
+                        settlement_type = SettlementType.NONE
+                        settlement_denomination = denomination
+                        if settlement_type != SettlementType.NONE:
+                            settlement_denomination = get_input("Enter denomination: ")
+                        
+                        cash_flow_at_maturity = 0
+                        if maturity_type == MaturityType.FIXED_DATE:
+                            cash_flow_at_maturity = get_input("Enter cash flow at maturity (if applicable): ", float)
+                            
+                        if entry_type in [EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
+                            bond_type = select_enum(BondType, "Enter bond type")
+                            coupon_rate = get_input("Enter coupon rate: ", float)
+                        elif entry_type == EntryType.BOND_ZERO_COUPON:
+                            bond_type = BondType.ZERO_COUPON
+
+                        pair = AssetLiabilityPair(
+                            time=system.current_time_state,
+                            type=entry_type.value,
+                            amount=amount,
+                            denomination=denomination,
+                            maturity_type=maturity_type,
+                            maturity_date=maturity_date,
+                            settlement_type=settlement_type,
+                            settlement_denomination=settlement_denomination,
+                            asset_holder=asset_holder,
+                            liability_holder=liability_holder,
+                            cash_flow_at_maturity=cash_flow_at_maturity,
+                            asset_name=asset_name,
+                            bond_type=bond_type,
+                            coupon_rate=coupon_rate
+                        )
+                        system.create_asset_liability_pair(pair)
+                        print("asset-liability pair created successfully.")
+                    
+                    elif entry_type == EntryType.DEPOSIT:
+                        liability_holder = select_agent(system, "select liability holder")
+                        if not liability_holder:
+                            continue
+
+                        amount = get_input("Enter amount: ", float)
+                        denomination = get_input("Enter denomination (USD, shares, reserves, etc.): ")
+                        maturity_type = MaturityType.ON_DEMAND
+                        maturity_date = None
+                        if maturity_type == MaturityType.FIXED_DATE:
+                            maturity_date = get_input("Enter maturity date: ", int, choices=[1, 2])
+                        
+                        settlement_type = SettlementType.NONE
+                        settlement_denomination = denomination
+                        if settlement_type != SettlementType.NONE:
+                            settlement_denomination = get_input("Enter denomination: ")
+                        
+                        cash_flow_at_maturity = 0
+                        if maturity_type == MaturityType.FIXED_DATE:
+                            cash_flow_at_maturity = get_input("Enter cash flow at maturity (if applicable): ", float)
+                            
+                        if entry_type in [EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
+                            bond_type = select_enum(BondType, "Enter bond type")
+                            coupon_rate = get_input("Enter coupon rate: ", float)
+                        elif entry_type == EntryType.BOND_ZERO_COUPON:
+                            bond_type = BondType.ZERO_COUPON
+
+                        pair = AssetLiabilityPair(
+                            time=system.current_time_state,
+                            type=entry_type.value,
+                            amount=amount,
+                            denomination=denomination,
+                            maturity_type=maturity_type,
+                            maturity_date=maturity_date,
+                            settlement_type=settlement_type,
+                            settlement_denomination=settlement_denomination,
+                            asset_holder=asset_holder,
+                            liability_holder=liability_holder,
+                            cash_flow_at_maturity=cash_flow_at_maturity,
+                            asset_name=asset_name,
+                            bond_type=bond_type,
+                            coupon_rate=coupon_rate
+                        )
+                        system.create_asset_liability_pair(pair)
+                        print("asset-liability pair created successfully.")
+
+                    
+                    else:
+                        liability_holder = select_agent(system, "select liability holder")
+                        if not liability_holder:
+                            continue
+
+                        amount = get_input("Enter amount: ", float)
+                        denomination = get_input("Enter denomination (USD, shares, reserves, etc.): ")
+                        maturity_type = select_enum(MaturityType, "select maturity type")
+                        maturity_date = None
+                        if maturity_type == MaturityType.FIXED_DATE:
+                            maturity_date = get_input("Enter maturity date: ", int, choices=[1, 2])
+                        
+                        settlement_type = select_enum(SettlementType, "select settlement type")
+                        settlement_denomination = denomination
+                        if settlement_type != SettlementType.NONE:
+                            settlement_denomination = get_input("Enter denomination: ")
+                        
+                        cash_flow_at_maturity = 0
+                        if maturity_type == MaturityType.FIXED_DATE:
+                            cash_flow_at_maturity = get_input("Enter cash flow at maturity (if applicable): ", float)
+                            
+                        if entry_type in [EntryType.BOND_COUPON, EntryType.BOND_AMORTIZING]:
+                            bond_type = select_enum(BondType, "Enter bond type")
+                            coupon_rate = get_input("Enter coupon rate: ", float)
+                        elif entry_type == EntryType.BOND_ZERO_COUPON:
+                            bond_type = BondType.ZERO_COUPON
+
+                        pair = AssetLiabilityPair(
+                            time=system.current_time_state,
+                            type=entry_type.value,
+                            amount=amount,
+                            denomination=denomination,
+                            maturity_type=maturity_type,
+                            maturity_date=maturity_date,
+                            settlement_type=settlement_type,
+                            settlement_denomination=settlement_denomination,
+                            asset_holder=asset_holder,
+                            liability_holder=liability_holder,
+                            cash_flow_at_maturity=cash_flow_at_maturity,
+                            asset_name=asset_name,
+                            bond_type=bond_type,
+                            coupon_rate=coupon_rate
+                        )
+                        system.create_asset_liability_pair(pair)
+                        print("asset-liability pair created successfully.")                    
                 elif action_type == 'Repay Loan':
                      borrower = select_agent(system, "Select borrower")
                      lender = select_agent(system, "Select lender")
@@ -1886,20 +2123,20 @@ def main_interactive():
                          params['lender'] = lender.name
                          params['amount'] = get_input("Enter amount: ", float)
                          params['denomination'] = get_input("Enter denomination: ", str)
-                elif action_type == 'Issue Bond':
-                    issuer = select_agent(system, "Select issuer")
-                    buyer = select_agent(system, "Select buyer")
-                    if issuer and buyer:
-                        params['issuer'] = issuer.name
-                        params['buyer'] = buyer.name
-                        params['amount'] = get_input("Enter amount: ", float)
-                        bond_type_enum = select_enum(BondType, "Select bond type")
-                        params['bond_type'] = bond_type_enum.value
-                        if bond_type_enum != BondType.ZERO_COUPON:
-                             params['coupon_rate'] = get_input("Enter coupon rate: ", float)
-                        params['maturity'] = get_input("Enter maturity date: ", int, choices=[1, 2])
-                        params['price'] = get_input("Enter price: ", float)
-                        params['denomination'] = get_input("Enter denomination: ", str)
+                # elif action_type == 'Issue Bond':
+                #     issuer = select_agent(system, "Select issuer")
+                #     buyer = select_agent(system, "Select buyer")
+                #     if issuer and buyer:
+                #         params['issuer'] = issuer.name
+                #         params['buyer'] = buyer.name
+                #         params['amount'] = get_input("Enter amount: ", float)
+                #         bond_type_enum = select_enum(BondType, "Select bond type")
+                #         params['bond_type'] = bond_type_enum.value
+                #         if bond_type_enum != BondType.ZERO_COUPON:
+                #              params['coupon_rate'] = get_input("Enter coupon rate: ", float)
+                #         params['maturity'] = get_input("Enter maturity date: ", int, choices=[1, 2])
+                #         params['price'] = get_input("Enter price: ", float)
+                #         params['denomination'] = get_input("Enter denomination: ", str)
                 elif action_type == 'Repay Bond':
                      issuer = select_agent(system, "Select issuer")
                      holder = select_agent(system, "Select holder")
@@ -1909,15 +2146,15 @@ def main_interactive():
                          params['amount'] = get_input("Enter amount: ", float)
                          params['interest'] = get_input("Enter interest: ", float)
                          params['denomination'] = get_input("Enter denomination: ", str)
-                elif action_type == 'Issue Share':
-                    issuer = select_agent(system, "Select issuer")
-                    buyer = select_agent(system, "Select buyer")
-                    if issuer and buyer:
-                        params['issuer'] = issuer.name
-                        params['buyer'] = buyer.name
-                        params['amount'] = get_input("Enter amount: ", float)
-                        params['price'] = get_input("Enter price: ", float)
-                        params['price_denomination'] = get_input("Enter denomination: ", str)
+                # elif action_type == 'Issue Share':
+                #     issuer = select_agent(system, "Select issuer")
+                #     buyer = select_agent(system, "Select buyer")
+                #     if issuer and buyer:
+                #         params['issuer'] = issuer.name
+                #         params['buyer'] = buyer.name
+                #         params['amount'] = get_input("Enter amount: ", float)
+                #         params['price'] = get_input("Enter price: ", float)
+                #         params['price_denomination'] = get_input("Enter denomination: ", str)
                 elif action_type == 'Pay Dividend':
                      issuer = select_agent(system, "Select issuer")
                      if issuer:
@@ -2006,175 +2243,3 @@ def main_interactive():
 
 if __name__ == "__main__":
     main_interactive()
-
-    # # --- 原来的演示代码 (注释掉) ---
-    # # 创建经济系统
-    # system = EconomicSystem()
-    # 
-    # # 创建代理
-    # central_bank = Agent("Central Bank", AgentType.CENTRAL_BANK)
-    # bank_a = Agent("Bank A", AgentType.BANK)
-    # bank_b = Agent("Bank B", AgentType.BANK)
-    # company = Agent("Company", AgentType.COMPANY)
-    # household = Agent("Household", AgentType.HOUSEHOLD)
-    # 
-    # # 添加代理到系统
-    # system.add_agent(central_bank)
-    # system.add_agent(bank_a)
-    # system.add_agent(bank_b)
-    # system.add_agent(company)
-    # system.add_agent(household)
-    # 
-    # # 创建初始资产-负债对
-    # 
-    # # 1. 中央银行向银行A发行准备金
-    # reserves_pair = AssetLiabilityPair(
-    #     time=0,
-    #     type=EntryType.DEPOSIT.value,
-    #     amount=100.0,
-    #     denomination="reserves",
-    #     maturity_type=MaturityType.ON_DEMAND,
-    #     maturity_date=None,
-    #     settlement_type=SettlementType.NONE,
-    #     settlement_denomination="reserves",
-    #     asset_holder=bank_a,
-    #     liability_holder=central_bank
-    # )
-    # system.create_asset_liability_pair(reserves_pair)
-    # 
-    # # 2. 银行A向公司发放贷款
-    # loan_pair = AssetLiabilityPair(
-    #     time=0,
-    #     type=EntryType.LOAN.value,
-    #     amount=50.0,
-    #     denomination="USD",
-    #     maturity_type=MaturityType.FIXED_DATE,
-    #     maturity_date=1,  # t1到期
-    #     settlement_type=SettlementType.MEANS_OF_PAYMENT,
-    #     settlement_denomination="USD",
-    #     asset_holder=bank_a,
-    #     liability_holder=company,
-    #     cash_flow_at_maturity=55.0  # 包含利息
-    # )
-    # system.create_asset_liability_pair(loan_pair)
-    # 
-    # # 3. 银行A为公司创建存款（贷款资金）
-    # deposit_pair = AssetLiabilityPair(
-    #     time=0,
-    #     type=EntryType.DEPOSIT.value,
-    #     amount=50.0,
-    #     denomination="USD",
-    #     maturity_type=MaturityType.ON_DEMAND,
-    #     maturity_date=None,
-    #     settlement_type=SettlementType.NONE,
-    #     settlement_denomination="USD",
-    #     asset_holder=company,
-    #     liability_holder=bank_a
-    # )
-    # system.create_asset_liability_pair(deposit_pair)
-    # 
-    # # 4. 公司向家庭发行股份
-    # share_pair = AssetLiabilityPair(
-    #     time=0,
-    #     type=EntryType.SHARE.value,
-    #     amount=100.0,  # 股份数量
-    #     denomination="shares",
-    #     maturity_type=MaturityType.PERPETUAL,
-    #     maturity_date=None,
-    #     settlement_type=SettlementType.NONE,
-    #     settlement_denomination="shares",
-    #     asset_holder=household,
-    #     liability_holder=company
-    # )
-    # system.create_asset_liability_pair(share_pair)
-    # 
-    # # 5. 家庭向公司支付股份购买资金
-    # share_payment_pair = AssetLiabilityPair(
-    #     time=0,
-    #     type=EntryType.DEPOSIT.value,
-    #     amount=20.0,  # 股份价格
-    #     denomination="USD",
-    #     maturity_type=MaturityType.ON_DEMAND,
-    #     maturity_date=None,
-    #     settlement_type=SettlementType.NONE,
-    #     settlement_denomination="USD",
-    #     asset_holder=company,
-    #     liability_holder=bank_b
-    # )
-    # system.create_asset_liability_pair(share_payment_pair)
-    # 
-    # # 6. 银行B为家庭创建存款
-    # household_deposit_pair = AssetLiabilityPair(
-    #     time=0,
-    #     type=EntryType.DEPOSIT.value,
-    #     amount=30.0,
-    #     denomination="USD",
-    #     maturity_type=MaturityType.ON_DEMAND,
-    #     maturity_date=None,
-    #     settlement_type=SettlementType.NONE,
-    #     settlement_denomination="USD",
-    #     asset_holder=household,
-    #     liability_holder=bank_b
-    # )
-    # system.create_asset_liability_pair(household_deposit_pair)
-    # 
-    # # 7. 公司向家庭发行债券
-    # bond_pair = AssetLiabilityPair(
-    #     time=0,
-    #     type=EntryType.BOND_COUPON.value,
-    #     amount=10.0,
-    #     denomination="USD",
-    #     maturity_type=MaturityType.FIXED_DATE,
-    #     maturity_date=2,  # t2到期
-    #     settlement_type=SettlementType.MEANS_OF_PAYMENT,
-    #     settlement_denomination="USD",
-    #     asset_holder=household,
-    #     liability_holder=company,
-    #     bond_type=BondType.COUPON,
-    #     coupon_rate=0.05  # 5%息票率
-    # )
-    # system.create_asset_liability_pair(bond_pair)
-    # 
-    # # 调度操作
-    # 
-    # # 在t1时，公司向银行A还款
-    # system.schedule_action(1, 'Repay Loan', {
-    #     'borrower': 'Company',
-    #     'lender': 'Bank A',
-    #     'amount': 55.0,
-    #     'denomination': 'USD'
-    # })
-    # 
-    # # 在t1时，公司支付股息
-    # system.schedule_action(1, 'Pay Dividend', {
-    #     'issuer': 'Company',
-    #     'dividend_per_share': 0.1,  # 每股0.1美元
-    #     'denomination': 'USD'
-    # })
-    # 
-    # # 在t2时，公司偿还债券
-    # system.schedule_action(2, 'Repay Bond', {
-    #     'issuer': 'Company',
-    #     'holder': 'Household',
-    #     'amount': 10.0,
-    #     'interest': 0.5,  # 最后一次息票
-    #     'denomination': 'USD'
-    # })
-    # 
-    # # 处理t1结算
-    # system.settle_entries(1)
-    # 
-    # # 运行t1的调度操作
-    # system.run_user_scheduled_actions()
-    # 
-    # # 处理t2结算
-    # system.settle_entries(2)
-    # 
-    # # 运行t2的调度操作
-    # system.run_user_scheduled_actions()
-    # 
-    # # 导出到Excel
-    # export_to_excel(system, "economic_simulation_results.xlsx")
-    # 
-    # print("模拟完成！结果已导出到economic_simulation_results.xlsx")
-    pass # 占位符，因为之前的main被注释了
