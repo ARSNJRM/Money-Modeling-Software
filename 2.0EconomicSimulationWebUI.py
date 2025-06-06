@@ -4324,7 +4324,363 @@ class ExcelExporter:
         
         return total_row + 3
 
+    def create_changes_sheet(self, wb):
+        """Create a sheet showing changes between time points."""
+        sheet = wb.create_sheet(title="Changes Between Time Points")
+        
+        # Column headers
+        headers = ["Agent", "Time Change", "Changes", "Type", "Amount", "Denomination", 
+                   "Counterparty", "Entry Type", "Maturity", "Settlement", "Current Value", "CF@Mat"]
+        
+        for col, header in enumerate(headers, 1):
+            cell = sheet.cell(row=1, column=col)
+            cell.value = header
+            cell.font = openpyxl.styles.Font(bold=True)
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = Border(bottom=Side(style='thick'))
+            
+        current_row = 2
+        
+        # Get time transitions - use system's time points
+        time_points = self.system.get_time_points()
+        transitions = []
+        for i in range(len(time_points) - 1):
+            transitions.append((time_points[i], time_points[i + 1]))
+        
+        # Process each transition
+        for from_time, to_time in transitions:
+            # Skip if we don't have both time states
+            if from_time not in self.system.time_states or to_time not in self.system.time_states:
+                continue
+                
+            # Get changes for this transition
+            changes = self.system.compute_changes(from_time, to_time)
+            
+            # Add changes for each agent
+            for agent_name, agent_changes in changes.items():
+                # New assets
+                for entry in agent_changes['new_assets']:
+                    sheet.cell(row=current_row, column=1).value = agent_name
+                    sheet.cell(row=current_row, column=2).value = f"t{from_time} → t{to_time}"
+                    sheet.cell(row=current_row, column=3).value = "New Asset"
+                    sheet.cell(row=current_row, column=4).value = "Asset"
+                    sheet.cell(row=current_row, column=5).value = entry.initial_book_value
+                    sheet.cell(row=current_row, column=6).value = entry.denomination
+                    sheet.cell(row=current_row, column=7).value = entry.counterparty
+                    sheet.cell(row=current_row, column=8).value = entry.type.value
+                    
+                    maturity = entry.maturity_type.value
+                    if entry.maturity_type == MaturityType.FIXED_DATE and entry.maturity_date:
+                        maturity = f"t{entry.maturity_date}"
+                    sheet.cell(row=current_row, column=9).value = maturity
+                    
+                    settlement = entry.settlement_details.type.value
+                    if settlement != "none":
+                        settlement += f" ({entry.settlement_details.denomination})"
+                    sheet.cell(row=current_row, column=10).value = settlement
+                    sheet.cell(row=current_row, column=11).value = f"{entry.current_book_value:.2f}"
+                    sheet.cell(row=current_row, column=12).value = f"{entry.cash_flow_at_maturity:.2f}" if entry.cash_flow_at_maturity else "N/A"
+                    
+                    current_row += 1
+                
+                # Removed assets
+                for entry in agent_changes['removed_assets']:
+                    sheet.cell(row=current_row, column=1).value = agent_name
+                    sheet.cell(row=current_row, column=2).value = f"t{from_time} → t{to_time}"
+                    sheet.cell(row=current_row, column=3).value = "Removed Asset"
+                    sheet.cell(row=current_row, column=4).value = "Asset"
+                    sheet.cell(row=current_row, column=5).value = entry.initial_book_value
+                    sheet.cell(row=current_row, column=6).value = entry.denomination
+                    sheet.cell(row=current_row, column=7).value = entry.counterparty
+                    sheet.cell(row=current_row, column=8).value = entry.type.value
+                    
+                    maturity = entry.maturity_type.value
+                    if entry.maturity_type == MaturityType.FIXED_DATE and entry.maturity_date:
+                        maturity = f"t{entry.maturity_date}"
+                    sheet.cell(row=current_row, column=9).value = maturity
+                    
+                    settlement = entry.settlement_details.type.value
+                    if settlement != "none":
+                        settlement += f" ({entry.settlement_details.denomination})"
+                    sheet.cell(row=current_row, column=10).value = settlement
+                    sheet.cell(row=current_row, column=11).value = f"{entry.current_book_value:.2f}"
+                    sheet.cell(row=current_row, column=12).value = f"{entry.cash_flow_at_maturity:.2f}" if entry.cash_flow_at_maturity else "N/A"
+                    
+                    current_row += 1
+                
+                # New liabilities
+                for entry in agent_changes['new_liabilities']:
+                    sheet.cell(row=current_row, column=1).value = agent_name
+                    sheet.cell(row=current_row, column=2).value = f"t{from_time} → t{to_time}"
+                    sheet.cell(row=current_row, column=3).value = "New Liability"
+                    sheet.cell(row=current_row, column=4).value = "Liability"
+                    sheet.cell(row=current_row, column=5).value = entry.initial_book_value
+                    sheet.cell(row=current_row, column=6).value = entry.denomination
+                    sheet.cell(row=current_row, column=7).value = entry.counterparty
+                    sheet.cell(row=current_row, column=8).value = entry.type.value
+                    
+                    maturity = entry.maturity_type.value
+                    if entry.maturity_type == MaturityType.FIXED_DATE and entry.maturity_date:
+                        maturity = f"t{entry.maturity_date}"
+                    sheet.cell(row=current_row, column=9).value = maturity
+                    
+                    settlement = entry.settlement_details.type.value
+                    if settlement != "none":
+                        settlement += f" ({entry.settlement_details.denomination})"
+                    sheet.cell(row=current_row, column=10).value = settlement
+                    sheet.cell(row=current_row, column=11).value = f"{entry.current_book_value:.2f}"
+                    sheet.cell(row=current_row, column=12).value = f"{entry.cash_flow_at_maturity:.2f}" if entry.cash_flow_at_maturity else "N/A"
+                    
+                    current_row += 1
+                
+                # Removed liabilities
+                for entry in agent_changes['removed_liabilities']:
+                    sheet.cell(row=current_row, column=1).value = agent_name
+                    sheet.cell(row=current_row, column=2).value = f"t{from_time} → t{to_time}"
+                    sheet.cell(row=current_row, column=3).value = "Removed Liability"
+                    sheet.cell(row=current_row, column=4).value = "Liability"
+                    sheet.cell(row=current_row, column=5).value = entry.initial_book_value
+                    sheet.cell(row=current_row, column=6).value = entry.denomination
+                    sheet.cell(row=current_row, column=7).value = entry.counterparty
+                    sheet.cell(row=current_row, column=8).value = entry.type.value
+                    
+                    maturity = entry.maturity_type.value
+                    if entry.maturity_type == MaturityType.FIXED_DATE and entry.maturity_date:
+                        maturity = f"t{entry.maturity_date}"
+                    sheet.cell(row=current_row, column=9).value = maturity
+                    
+                    settlement = entry.settlement_details.type.value
+                    if settlement != "none":
+                        settlement += f" ({entry.settlement_details.denomination})"
+                    sheet.cell(row=current_row, column=10).value = settlement
+                    sheet.cell(row=current_row, column=11).value = f"{entry.current_book_value:.2f}"
+                    sheet.cell(row=current_row, column=12).value = f"{entry.cash_flow_at_maturity:.2f}" if entry.cash_flow_at_maturity else "N/A"
+                    
+                    current_row += 1
+        
+        # Format the sheet
+        for col in range(1, 13):
+            sheet.column_dimensions[get_column_letter(col)].width = 18
+            
+        return sheet
+
+    def create_settlement_history_sheet(self, wb):
+        """Create a sheet showing settlement history."""
+        sheet = wb.create_sheet(title="Settlement History")
+        
+        # Column headers
+        headers = ["Agent", "Role", "Time Point", "Original Entry Type", "Original Amount", 
+                  "Original Denomination", "Original Current Value", "Original CF@Mat",
+                  "Settled With/For Type", "Settled Amount", "Settled Denomination", 
+                  "Settled Current Value", "Settled CF@Mat", "Counterparty"]
+        
+        for col, header in enumerate(headers, 1):
+            cell = sheet.cell(row=1, column=col)
+            cell.value = header
+            cell.font = openpyxl.styles.Font(bold=True)
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = Border(bottom=Side(style='thick'))
+            
+        current_row = 2
+        
+        # Process settlement history for each agent
+        for agent_name, agent in self.system.agents.items():
+            # Process asset holder settlements
+            for settlement in agent.settlement_history.get('as_asset_holder', []):
+                sheet.cell(row=current_row, column=1).value = agent_name
+                sheet.cell(row=current_row, column=2).value = "Asset Holder"
+                sheet.cell(row=current_row, column=3).value = f"t{settlement['time_point']}"
+                sheet.cell(row=current_row, column=4).value = settlement['original_entry'].type.value
+                sheet.cell(row=current_row, column=5).value = settlement['original_entry'].initial_book_value
+                sheet.cell(row=current_row, column=6).value = settlement['original_entry'].denomination
+                sheet.cell(row=current_row, column=7).value = f"{settlement['original_entry'].current_book_value:.2f}"
+                sheet.cell(row=current_row, column=8).value = f"{settlement['original_entry'].cash_flow_at_maturity:.2f}" if settlement['original_entry'].cash_flow_at_maturity else "N/A"
+                sheet.cell(row=current_row, column=9).value = settlement['settlement_result'].type.value
+                sheet.cell(row=current_row, column=10).value = settlement['settlement_result'].initial_book_value
+                sheet.cell(row=current_row, column=11).value = settlement['settlement_result'].denomination
+                sheet.cell(row=current_row, column=12).value = f"{settlement['settlement_result'].current_book_value:.2f}"
+                sheet.cell(row=current_row, column=13).value = f"{settlement['settlement_result'].cash_flow_at_maturity:.2f}" if settlement['settlement_result'].cash_flow_at_maturity else "N/A"
+                sheet.cell(row=current_row, column=14).value = settlement['counterparty']
+                current_row += 1
+                
+            # Process liability holder settlements
+            for settlement in agent.settlement_history.get('as_liability_holder', []):
+                sheet.cell(row=current_row, column=1).value = agent_name
+                sheet.cell(row=current_row, column=2).value = "Liability Holder"
+                sheet.cell(row=current_row, column=3).value = f"t{settlement['time_point']}"
+                sheet.cell(row=current_row, column=4).value = settlement['original_entry'].type.value
+                sheet.cell(row=current_row, column=5).value = settlement['original_entry'].initial_book_value
+                sheet.cell(row=current_row, column=6).value = settlement['original_entry'].denomination
+                sheet.cell(row=current_row, column=7).value = f"{settlement['original_entry'].current_book_value:.2f}"
+                sheet.cell(row=current_row, column=8).value = f"{settlement['original_entry'].cash_flow_at_maturity:.2f}" if settlement['original_entry'].cash_flow_at_maturity else "N/A"
+                sheet.cell(row=current_row, column=9).value = settlement['settlement_result'].type.value
+                sheet.cell(row=current_row, column=10).value = settlement['settlement_result'].initial_book_value
+                sheet.cell(row=current_row, column=11).value = settlement['settlement_result'].denomination
+                sheet.cell(row=current_row, column=12).value = f"{settlement['settlement_result'].current_book_value:.2f}"
+                sheet.cell(row=current_row, column=13).value = f"{settlement['settlement_result'].cash_flow_at_maturity:.2f}" if settlement['settlement_result'].cash_flow_at_maturity else "N/A"
+                sheet.cell(row=current_row, column=14).value = settlement['counterparty']
+                current_row += 1
+        
+        # Format the sheet
+        for col in range(1, 15):
+            sheet.column_dimensions[get_column_letter(col)].width = 18
+            
+        return sheet
+
+    def create_system_metrics_sheet(self, wb):
+        """Create a sheet with system-wide metrics across time points."""
+        sheet = wb.create_sheet(title="System Metrics")
+        
+        # Column headers for time points
+        sheet.cell(row=1, column=1).value = "Metric"
+        sheet.cell(row=1, column=1).font = openpyxl.styles.Font(bold=True)
+        
+        time_points = self.system.get_time_points()
+        for i, tp in enumerate(time_points, 1):
+            cell = sheet.cell(row=1, column=i+1)
+            cell.value = f"t{tp}"
+            cell.font = openpyxl.styles.Font(bold=True)
+            cell.alignment = Alignment(horizontal="center")
+        
+        # Add system-wide metrics
+        metrics = [
+            "Total Assets", 
+            "Total Liabilities",
+            "Total Net Worth",
+            "Number of Agents",
+            "Number of Asset-Liability Pairs",
+            "Number of Scheduled Actions"
+        ]
+        
+        for i, metric in enumerate(metrics, 1):
+            sheet.cell(row=i+1, column=1).value = metric
+            sheet.cell(row=i+1, column=1).font = openpyxl.styles.Font(bold=True)
+            
+        # Populate metrics for each time point
+        for j, tp in enumerate(time_points, 1):
+            agents = (self.system.time_states[tp].values() 
+                    if tp in self.system.time_states 
+                    else self.system.agents.values())
+            
+            # Total assets
+            total_assets = sum(agent.get_total_assets() for agent in agents)
+            sheet.cell(row=2, column=j+1).value = total_assets
+            
+            # Total liabilities
+            total_liabilities = sum(agent.get_total_liabilities() for agent in agents)
+            sheet.cell(row=3, column=j+1).value = total_liabilities
+            
+            # Total net worth
+            total_net_worth = sum(agent.get_net_worth() for agent in agents)
+            sheet.cell(row=4, column=j+1).value = total_net_worth
+            
+            # Number of agents
+            sheet.cell(row=5, column=j+1).value = len(agents)
+            
+            # Number of asset-liability pairs (only for t0)
+            if j == 1:  # Only for t0
+                sheet.cell(row=6, column=j+1).value = len(self.system.asset_liability_pairs)
+            
+            # Number of scheduled actions
+            if j == 1:  # Only for t0
+                scheduled_count = sum(len(actions) for actions in self.system.scheduled_actions.values())
+                sheet.cell(row=7, column=j+1).value = scheduled_count
+        
+        # Format the sheet
+        for col in range(1, len(time_points) + 2):
+            sheet.column_dimensions[get_column_letter(col)].width = 18
+            
+        return sheet
+
+    def create_agent_summaries_sheet(self, wb):
+        """Create a sheet with agent summaries across all time points."""
+        sheet = wb.create_sheet(title="Agent Summaries")
+        
+        # Headers
+        headers = ["Agent", "Type", "Time Point", "Total Assets", "Total Liabilities", "Net Worth", 
+                   "Asset Count", "Liability Count", "Status"]
+        
+        for col, header in enumerate(headers, 1):
+            cell = sheet.cell(row=1, column=col)
+            cell.value = header
+            cell.font = openpyxl.styles.Font(bold=True)
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = Border(bottom=Side(style='thick'))
+            
+        current_row = 2
+        
+        # Process each agent at each time point
+        time_points = self.system.get_time_points()
+        for tp in time_points:
+            agents = (self.system.time_states[tp].values() 
+                    if tp in self.system.time_states 
+                    else self.system.agents.values())
+                    
+            for agent in agents:
+                sheet.cell(row=current_row, column=1).value = agent.name
+                sheet.cell(row=current_row, column=2).value = agent.type.value
+                sheet.cell(row=current_row, column=3).value = f"t{tp}"
+                sheet.cell(row=current_row, column=4).value = agent.get_total_assets()
+                sheet.cell(row=current_row, column=5).value = agent.get_total_liabilities()
+                sheet.cell(row=current_row, column=6).value = agent.get_net_worth()
+                sheet.cell(row=current_row, column=7).value = len(agent.assets)
+                sheet.cell(row=current_row, column=8).value = len(agent.liabilities)
+                sheet.cell(row=current_row, column=9).value = getattr(agent, 'status', 'operating')
+                current_row += 1
+        
+        # Format the sheet
+        for col in range(1, 10):
+            sheet.column_dimensions[get_column_letter(col)].width = 18
+            
+        return sheet
+
+    def create_scheduled_actions_sheet(self, wb):
+        """Create a sheet showing scheduled actions."""
+        sheet = wb.create_sheet(title="Scheduled Actions")
+        
+        # Column headers
+        headers = ["Time Point", "Action Type", "Asset Holder", "Liability Holder", "Entry Type", 
+                   "Amount", "Denomination", "Maturity Type", "Maturity Date", "Settlement Type", 
+                   "Asset Name", "Bond Type", "Coupon Rate", "Cash Flow @ Maturity"]
+        
+        for col, header in enumerate(headers, 1):
+            cell = sheet.cell(row=1, column=col)
+            cell.value = header
+            cell.font = openpyxl.styles.Font(bold=True)
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = Border(bottom=Side(style='thick'))
+            
+        current_row = 2
+        
+        # Process scheduled actions
+        for time_point, actions in self.system.scheduled_actions.items():
+            for action in actions:
+                if action['type'] == 'create_asset_liability_pair':
+                    data = action['data']
+                    sheet.cell(row=current_row, column=1).value = f"t{time_point}"
+                    sheet.cell(row=current_row, column=2).value = action['type']
+                    sheet.cell(row=current_row, column=3).value = data.get('asset_holder_name', '')
+                    sheet.cell(row=current_row, column=4).value = data.get('liability_holder_name', '')
+                    sheet.cell(row=current_row, column=5).value = data.get('type', '')
+                    sheet.cell(row=current_row, column=6).value = data.get('amount', 0)
+                    sheet.cell(row=current_row, column=7).value = data.get('denomination', '')
+                    sheet.cell(row=current_row, column=8).value = data.get('maturity_type', '')
+                    sheet.cell(row=current_row, column=9).value = data.get('maturity_date', '')
+                    sheet.cell(row=current_row, column=10).value = data.get('settlement_type', '')
+                    sheet.cell(row=current_row, column=11).value = data.get('asset_name', '')
+                    sheet.cell(row=current_row, column=12).value = data.get('bond_type', '')
+                    sheet.cell(row=current_row, column=13).value = data.get('coupon_rate', '')
+                    sheet.cell(row=current_row, column=14).value = data.get('cash_flow_at_maturity', '')
+                    current_row += 1
+        
+        # Format the sheet
+        for col in range(1, 15):
+            sheet.column_dimensions[get_column_letter(col)].width = 18
+            
+        return sheet
+
     def export_balance_sheets(self, output_stream: BytesIO):
+        """Export all data to an Excel workbook."""
         wb = openpyxl.Workbook()
         sheet = wb.active
         sheet.title = "Balance Sheets"
@@ -4335,7 +4691,13 @@ class ExcelExporter:
 
         for idx, time_point_int in enumerate(time_points_int_fetch):
             time_point_str = time_points_str_display[idx]
-            agents = self.system.get_agents_at_time(time_point_int).values()
+            
+            # Get agents at this time point, handle potential empty states
+            try:
+                agents = list(self.system.get_agents_at_time(time_point_int).values())
+            except Exception as e:
+                print(f"Warning: Could not get agents for time point {time_point_int}: {e}")
+                continue
 
             if idx > 0:
                 current_row_global +=1
@@ -4357,6 +4719,7 @@ class ExcelExporter:
                 if agent_idx > 0:
                     col_start_agent += 11
                 
+                # Move to next row if too many agents horizontally
                 if col_start_agent > 3 * 11:
                     current_row_global = max_row_for_agents_in_timepoint + 2
                     row_for_this_timepoint_start = current_row_global
@@ -4385,10 +4748,39 @@ class ExcelExporter:
             sheet.cell(row=current_row_global, column=2).value = sum(a.get_net_worth() for a in agents)
             current_row_global += 2
 
+        # Add additional sheets with error handling
+        try:
+            self.create_changes_sheet(wb)
+        except Exception as e:
+            print(f"Warning: Could not create changes sheet: {e}")
+            
+        try:
+            self.create_settlement_history_sheet(wb)
+        except Exception as e:
+            print(f"Warning: Could not create settlement history sheet: {e}")
+            
+        try:
+            self.create_system_metrics_sheet(wb)
+        except Exception as e:
+            print(f"Warning: Could not create system metrics sheet: {e}")
+            
+        try:
+            self.create_agent_summaries_sheet(wb)
+        except Exception as e:
+            print(f"Warning: Could not create agent summaries sheet: {e}")
+            
+        try:
+            self.create_scheduled_actions_sheet(wb)
+        except Exception as e:
+            print(f"Warning: Could not create scheduled actions sheet: {e}")
+
         # Auto-size columns for better readability
-        for column_cells in sheet.columns:
-            length = max(len(str(cell.value) if cell.value is not None else "") for cell in column_cells)
-            sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = length + 2
+        try:
+            for column_cells in sheet.columns:
+                length = max(len(str(cell.value) if cell.value is not None else "") for cell in column_cells)
+                sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(length + 2, 50)
+        except Exception as e:
+            print(f"Warning: Could not auto-size columns: {e}")
 
         wb.save(output_stream)
 
